@@ -38,69 +38,455 @@ const server = createServer((req, res) => {
   if (url === '/' || url === '/index.html') {
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(`<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <title>AGRI-OS</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AgriTwin Dairy Agentic AI Platform</title>
   <style>
+    :root {
+      --primary-color: #2E7D32;
+      --secondary-color: #39D353;
+      --background-color: #0D1117;
+      --surface-color: #161B22;
+      --text-primary: #E6EDF3;
+      --text-secondary: #8B949E;
+      --border-color: #30363D;
+    }
+    
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
     body {
       font-family: JetBrains Mono, monospace;
-      background-color: #0D1117;
-      color: #39D353;
-      margin: 0;
-      padding: 20px;
-      display: flex;
-      flex-direction: column;
-      min-height: 100vh;
+      background-color: var(--background-color);
+      color: var(--text-primary);
+      line-height: 1.6;
     }
+    
     .container {
       max-width: 1200px;
       margin: 0 auto;
-      flex: 1;
+      padding: 20px;
     }
+    
     header {
-      background-color: #0D1117;
-      padding: 1rem;
-      border-bottom: 1px solid #39D353;
+      background-color: var(--surface-color);
+      padding: 1rem 2rem;
+      border-bottom: 1px solid var(--border-color);
+      position: sticky;
+      top: 0;
+      z-index: 100;
     }
-    .component-list {
-      margin: 1rem 0;
+    
+    .header-content {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
     }
-    .component-item {
-      padding: 0.5rem;
-      margin: 0.25rem 0;
-      background-color: #161B22;
-      border-radius: 4px;
-    }
-    .status-indicator {
-      color: #39D353;
+    
+    .logo {
+      font-size: 1.5rem;
       font-weight: bold;
+      color: var(--secondary-color);
+    }
+    
+    .status-bar {
+      background-color: var(--surface-color);
+      padding: 0.5rem 2rem;
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      gap: 2rem;
+    }
+    
+    .status-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    
+    .status-indicator {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background-color: var(--secondary-color);
+    }
+    
+    .dashboard-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1.5rem;
+      margin: 2rem 0;
+    }
+    
+    .card {
+      background-color: var(--surface-color);
+      border-radius: 8px;
+      padding: 1.5rem;
+      border: 1px solid var(--border-color);
+    }
+    
+    .card-header {
+      margin-bottom: 1rem;
+    }
+    
+    .card-title {
+      font-size: 1.1rem;
+      font-weight: bold;
+      color: var(--secondary-color);
+    }
+    
+    .kpi-value {
+      font-size: 2rem;
+      font-weight: bold;
+      margin: 0.5rem 0;
+    }
+    
+    .kpi-label {
+      color: var(--text-secondary);
+      font-size: 0.9rem;
+    }
+    
+    .herd-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1.5rem 0;
+    }
+    
+    .herd-table th,
+    .herd-table td {
+      padding: 0.75rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border-color);
+    }
+    
+    .herd-table th {
+      color: var(--secondary-color);
+      font-weight: bold;
+    }
+    
+    .herd-table tr:last-child td {
+      border-bottom: none;
+    }
+    
+    .trend-section {
+      margin: 2rem 0;
+      padding: 1.5rem;
+      background-color: var(--surface-color);
+      border-radius: 8px;
+      border: 1px solid var(--border-color);
+    }
+    
+    .chart-container {
+      height: 200px;
+      display: flex;
+      align-items: flex-end;
+      gap: 5px;
+      margin-top: 1rem;
+      padding: 1rem 0;
+    }
+    
+    .chart-bar {
+      flex: 1;
+      background-color: var(--secondary-color);
+      min-width: 20px;
+    }
+    
+    .panel {
+      background-color: var(--surface-color);
+      border-radius: 8px;
+      padding: 1.5rem;
+      margin: 1.5rem 0;
+      border: 1px solid var(--border-color);
+    }
+    
+    .alert-item,
+    .recommendation-item,
+    .activity-item {
+      padding: 0.75rem 0;
+      border-bottom: 1px solid var(--border-color);
+    }
+    
+    .alert-item:last-child,
+    .recommendation-item:last-child,
+    .activity-item:last-child {
+      border-bottom: none;
+    }
+    
+    .alert-high {
+      color: #FF6B6B;
+    }
+    
+    .alert-medium {
+      color: #FFD166;
+    }
+    
+    .zone-status {
+      display: flex;
+      gap: 1rem;
+      margin: 1rem 0;
+      flex-wrap: wrap;
+    }
+    
+    .zone-card {
+      background-color: var(--surface-color);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 1rem;
+      min-width: 150px;
+    }
+    
+    footer {
+      background-color: var(--surface-color);
+      padding: 1.5rem 2rem;
+      border-top: 1px solid var(--border-color);
+      margin-top: 2rem;
+      text-align: center;
+      color: var(--text-secondary);
+    }
+    
+    .grid-2col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.5rem;
+    }
+    
+    @media (max-width: 768px) {
+      .grid-2col {
+        grid-template-columns: 1fr;
+      }
+      
+      .header-content {
+        flex-direction: column;
+        gap: 0.5rem;
+        text-align: center;
+      }
     }
   </style>
 </head>
 <body>
   <header>
-    <h1>AGRI-OS - Dark Industrial Operations (Mission Control)</h1>
-    <div class="status-indicator">System Operational</div>
-  </header>
-  <div class="container">
-    <h2>Farm Status Overview</h2>
-    <div class="component-list">
-      <h3>Active Components:</h3>
-      <div class="component-item">1</div>
-      <div class="component-item">2</div>
-      <div class="component-item">3</div>
-      <div class="component-item">4</div>
-      <div class="component-item">FieldZoneMap</div>
-      <div class="component-item">AgentActivityFeed</div>
-      <div class="component-item">FarmStatusOverview</div>
-      <div class="component-item">BottomTabBar</div>
+    <div class="header-content">
+      <div class="logo">AgriTwin Dairy Agentic AI Platform</div>
+      <div class="nav-menu">
+        <span>Dashboard</span> | <span>Analytics</span> | <span>Alerts</span> | <span>Settings</span>
+      </div>
     </div>
-    <div class="bottom-tab-bar">
-      <p>BottomTabBar Component Active</p>
+  </header>
+  
+  <div class="status-bar">
+    <div class="status-item">
+      <div class="status-indicator"></div>
+      <span>Operational</span>
+    </div>
+    <div class="status-item">
+      <span>Last Updated: 5:32:17 pm</span>
+    </div>
+    <div class="status-item">
+      <span>Farm Status: Active</span>
     </div>
   </div>
+  
+  <div class="container">
+    <!-- KPI Cards -->
+    <div class="dashboard-grid">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Herd Size</div>
+        </div>
+        <div class="kpi-value">142</div>
+        <div class="kpi-label">Cows in herd</div>
+      </div>
+      
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Daily Milk Yield</div>
+        </div>
+        <div class="kpi-value">1,248 L</div>
+        <div class="kpi-label">Today's production</div>
+      </div>
+      
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Avg. Yield per Cow</div>
+        </div>
+        <div class="kpi-value">8.8 L</div>
+        <div class="kpi-label">Daily average</div>
+      </div>
+      
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Health Alerts</div>
+        </div>
+        <div class="kpi-value">3</div>
+        <div class="kpi-label">Active alerts</div>
+      </div>
+      
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Feed Efficiency</div>
+        </div>
+        <div class="kpi-value">1.2</div>
+        <div class="kpi-label">Feed conversion ratio</div>
+      </div>
+      
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Sensor Coverage</div>
+        </div>
+        <div class="kpi-value">98%</div>
+        <div class="kpi-label">Active monitoring</div>
+      </div>
+    </div>
+    
+    <!-- Herd Table -->
+    <div class="panel">
+      <h2>Cow Herd Overview</h2>
+      <table class="herd-table">
+        <thead>
+          <tr>
+            <th>Cow ID</th>
+            <th>Lactation Stage</th>
+            <th>Milk Yield (L)</th>
+            <th>Rumination</th>
+            <th>Health Risk</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>COW-001</td>
+            <td>Peak</td>
+            <td>12.4</td>
+            <td>Normal</td>
+            <td>Low</td>
+          </tr>
+          <tr>
+            <td>COW-002</td>
+            <td>Mid</td>
+            <td>9.8</td>
+            <td>Below Avg</td>
+            <td>Medium</td>
+          </tr>
+          <tr>
+            <td>COW-003</td>
+            <td>Dry</td>
+            <td>0.0</td>
+            <td>Inactive</td>
+            <td>Low</td>
+          </tr>
+          <tr>
+            <td>COW-004</td>
+            <td>Early</td>
+            <td>7.2</td>
+            <td>Normal</td>
+            <td>Low</td>
+          </tr>
+          <tr>
+            <td>COW-005</td>
+            <td>Peak</td>
+            <td>14.1</td>
+            <td>Above Avg</td>
+            <td>Low</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    
+    <!-- Milk Yield Trend -->
+    <div class="trend-section">
+      <h2>Milk Yield Trend (Last 7 Days)</h2>
+      <div class="chart-container">
+        <div class="chart-bar" style="height: 60%;"></div>
+        <div class="chart-bar" style="height: 75%;"></div>
+        <div class="chart-bar" style="height: 80%;"></div>
+        <div class="chart-bar" style="height: 90%;"></div>
+        <div class="chart-bar" style="height: 85%;"></div>
+        <div class="chart-bar" style="height: 70%;"></div>
+        <div class="chart-bar" style="height: 95%;"></div>
+      </div>
+    </div>
+    
+    <div class="grid-2col">
+      <!-- Health Alerts Panel -->
+      <div class="panel">
+        <h2>Health Alerts</h2>
+        <div class="alert-item alert-high">
+          <strong>High Risk</strong> - COW-002 showing reduced rumination
+        </div>
+        <div class="alert-item alert-medium">
+          <strong>Medium Risk</strong> - COW-007 approaching dry period
+        </div>
+        <div class="alert-item alert-medium">
+          <strong>Medium Risk</strong> - Unusual feeding pattern detected
+        </div>
+      </div>
+      
+      <!-- AI Recommendations Panel -->
+      <div class="panel">
+        <h2>AI Recommendations</h2>
+        <div class="recommendation-item">
+          <strong>Feeding</strong> - Increase concentrate feed for cows in peak lactation
+        </div>
+        <div class="recommendation-item">
+          <strong>Health</strong> - Schedule vet visit for COW-002 due to health indicators
+        </div>
+        <div class="recommendation-item">
+          <strong>Management</strong> - Optimize milking schedule for maximum throughput
+        </div>
+      </div>
+    </div>
+    
+    <!-- Agent Activity Feed -->
+    <div class="panel">
+      <h2>Agent Activity Feed</h2>
+      <div class="activity-item">
+        <strong>Health Agent</strong> - Analyzed cow health metrics, identified 2 concerns
+      </div>
+      <div class="activity-item">
+        <strong>Yield Agent</strong> - Predicted tomorrow's yield: 1,280 L (+2.5%)
+      </div>
+      <div class="activity-item">
+        <strong>Feeding Agent</strong> - Optimized feed distribution for current herd
+      </div>
+      <div class="activity-item">
+        <strong>Sensor Agent</strong> - Verified all sensors operational (98% coverage)
+      </div>
+    </div>
+    
+    <!-- Farm Zones / Sensor Status -->
+    <div class="panel">
+      <h2>Farm Zones & Sensor Status</h2>
+      <div class="zone-status">
+        <div class="zone-card">
+          <div><strong>North Pasture</strong></div>
+          <div>Status: Active</div>
+          <div>Sensors: 8/8</div>
+        </div>
+        <div class="zone-card">
+          <div><strong>South Barn</strong></div>
+          <div>Status: Active</div>
+          <div>Sensors: 12/12</div>
+        </div>
+        <div class="zone-card">
+          <div><strong>East Feeding</strong></div>
+          <div>Status: Active</div>
+          <div>Sensors: 5/5</div>
+        </div>
+        <div class="zone-card">
+          <div><strong>West Milking</strong></div>
+          <div>Status: Active</div>
+          <div>Sensors: 6/6</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  
   <footer>
-    <p>Powered by AGRI-OS - Dark Industrial Operations (Mission Control)</p>
+    <p>AgriTwin Dairy Agentic AI Platform | Generated by AgriTwin Agent Factory | Version: 1.0</p>
+    <p>Real-time monitoring and AI-powered insights for modern dairy operations</p>
   </footer>
 </body>
 </html>`);
@@ -111,69 +497,455 @@ const server = createServer((req, res) => {
   if (method === 'GET' && !url.startsWith('/api/')) {
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(`<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <title>AGRI-OS</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AgriTwin Dairy Agentic AI Platform</title>
   <style>
+    :root {
+      --primary-color: #2E7D32;
+      --secondary-color: #39D353;
+      --background-color: #0D1117;
+      --surface-color: #161B22;
+      --text-primary: #E6EDF3;
+      --text-secondary: #8B949E;
+      --border-color: #30363D;
+    }
+    
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
     body {
       font-family: JetBrains Mono, monospace;
-      background-color: #0D1117;
-      color: #39D353;
-      margin: 0;
-      padding: 20px;
-      display: flex;
-      flex-direction: column;
-      min-height: 100vh;
+      background-color: var(--background-color);
+      color: var(--text-primary);
+      line-height: 1.6;
     }
+    
     .container {
       max-width: 1200px;
       margin: 0 auto;
-      flex: 1;
+      padding: 20px;
     }
+    
     header {
-      background-color: #0D1117;
-      padding: 1rem;
-      border-bottom: 1px solid #39D353;
+      background-color: var(--surface-color);
+      padding: 1rem 2rem;
+      border-bottom: 1px solid var(--border-color);
+      position: sticky;
+      top: 0;
+      z-index: 100;
     }
-    .component-list {
-      margin: 1rem 0;
+    
+    .header-content {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
     }
-    .component-item {
-      padding: 0.5rem;
-      margin: 0.25rem 0;
-      background-color: #161B22;
-      border-radius: 4px;
-    }
-    .status-indicator {
-      color: #39D353;
+    
+    .logo {
+      font-size: 1.5rem;
       font-weight: bold;
+      color: var(--secondary-color);
+    }
+    
+    .status-bar {
+      background-color: var(--surface-color);
+      padding: 0.5rem 2rem;
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      gap: 2rem;
+    }
+    
+    .status-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    
+    .status-indicator {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background-color: var(--secondary-color);
+    }
+    
+    .dashboard-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1.5rem;
+      margin: 2rem 0;
+    }
+    
+    .card {
+      background-color: var(--surface-color);
+      border-radius: 8px;
+      padding: 1.5rem;
+      border: 1px solid var(--border-color);
+    }
+    
+    .card-header {
+      margin-bottom: 1rem;
+    }
+    
+    .card-title {
+      font-size: 1.1rem;
+      font-weight: bold;
+      color: var(--secondary-color);
+    }
+    
+    .kpi-value {
+      font-size: 2rem;
+      font-weight: bold;
+      margin: 0.5rem 0;
+    }
+    
+    .kpi-label {
+      color: var(--text-secondary);
+      font-size: 0.9rem;
+    }
+    
+    .herd-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1.5rem 0;
+    }
+    
+    .herd-table th,
+    .herd-table td {
+      padding: 0.75rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border-color);
+    }
+    
+    .herd-table th {
+      color: var(--secondary-color);
+      font-weight: bold;
+    }
+    
+    .herd-table tr:last-child td {
+      border-bottom: none;
+    }
+    
+    .trend-section {
+      margin: 2rem 0;
+      padding: 1.5rem;
+      background-color: var(--surface-color);
+      border-radius: 8px;
+      border: 1px solid var(--border-color);
+    }
+    
+    .chart-container {
+      height: 200px;
+      display: flex;
+      align-items: flex-end;
+      gap: 5px;
+      margin-top: 1rem;
+      padding: 1rem 0;
+    }
+    
+    .chart-bar {
+      flex: 1;
+      background-color: var(--secondary-color);
+      min-width: 20px;
+    }
+    
+    .panel {
+      background-color: var(--surface-color);
+      border-radius: 8px;
+      padding: 1.5rem;
+      margin: 1.5rem 0;
+      border: 1px solid var(--border-color);
+    }
+    
+    .alert-item,
+    .recommendation-item,
+    .activity-item {
+      padding: 0.75rem 0;
+      border-bottom: 1px solid var(--border-color);
+    }
+    
+    .alert-item:last-child,
+    .recommendation-item:last-child,
+    .activity-item:last-child {
+      border-bottom: none;
+    }
+    
+    .alert-high {
+      color: #FF6B6B;
+    }
+    
+    .alert-medium {
+      color: #FFD166;
+    }
+    
+    .zone-status {
+      display: flex;
+      gap: 1rem;
+      margin: 1rem 0;
+      flex-wrap: wrap;
+    }
+    
+    .zone-card {
+      background-color: var(--surface-color);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 1rem;
+      min-width: 150px;
+    }
+    
+    footer {
+      background-color: var(--surface-color);
+      padding: 1.5rem 2rem;
+      border-top: 1px solid var(--border-color);
+      margin-top: 2rem;
+      text-align: center;
+      color: var(--text-secondary);
+    }
+    
+    .grid-2col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.5rem;
+    }
+    
+    @media (max-width: 768px) {
+      .grid-2col {
+        grid-template-columns: 1fr;
+      }
+      
+      .header-content {
+        flex-direction: column;
+        gap: 0.5rem;
+        text-align: center;
+      }
     }
   </style>
 </head>
 <body>
   <header>
-    <h1>AGRI-OS - Dark Industrial Operations (Mission Control)</h1>
-    <div class="status-indicator">System Operational</div>
-  </header>
-  <div class="container">
-    <h2>Farm Status Overview</h2>
-    <div class="component-list">
-      <h3>Active Components:</h3>
-      <div class="component-item">1</div>
-      <div class="component-item">2</div>
-      <div class="component-item">3</div>
-      <div class="component-item">4</div>
-      <div class="component-item">FieldZoneMap</div>
-      <div class="component-item">AgentActivityFeed</div>
-      <div class="component-item">FarmStatusOverview</div>
-      <div class="component-item">BottomTabBar</div>
+    <div class="header-content">
+      <div class="logo">AgriTwin Dairy Agentic AI Platform</div>
+      <div class="nav-menu">
+        <span>Dashboard</span> | <span>Analytics</span> | <span>Alerts</span> | <span>Settings</span>
+      </div>
     </div>
-    <div class="bottom-tab-bar">
-      <p>BottomTabBar Component Active</p>
+  </header>
+  
+  <div class="status-bar">
+    <div class="status-item">
+      <div class="status-indicator"></div>
+      <span>Operational</span>
+    </div>
+    <div class="status-item">
+      <span>Last Updated: 5:32:17 pm</span>
+    </div>
+    <div class="status-item">
+      <span>Farm Status: Active</span>
     </div>
   </div>
+  
+  <div class="container">
+    <!-- KPI Cards -->
+    <div class="dashboard-grid">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Herd Size</div>
+        </div>
+        <div class="kpi-value">142</div>
+        <div class="kpi-label">Cows in herd</div>
+      </div>
+      
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Daily Milk Yield</div>
+        </div>
+        <div class="kpi-value">1,248 L</div>
+        <div class="kpi-label">Today's production</div>
+      </div>
+      
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Avg. Yield per Cow</div>
+        </div>
+        <div class="kpi-value">8.8 L</div>
+        <div class="kpi-label">Daily average</div>
+      </div>
+      
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Health Alerts</div>
+        </div>
+        <div class="kpi-value">3</div>
+        <div class="kpi-label">Active alerts</div>
+      </div>
+      
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Feed Efficiency</div>
+        </div>
+        <div class="kpi-value">1.2</div>
+        <div class="kpi-label">Feed conversion ratio</div>
+      </div>
+      
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Sensor Coverage</div>
+        </div>
+        <div class="kpi-value">98%</div>
+        <div class="kpi-label">Active monitoring</div>
+      </div>
+    </div>
+    
+    <!-- Herd Table -->
+    <div class="panel">
+      <h2>Cow Herd Overview</h2>
+      <table class="herd-table">
+        <thead>
+          <tr>
+            <th>Cow ID</th>
+            <th>Lactation Stage</th>
+            <th>Milk Yield (L)</th>
+            <th>Rumination</th>
+            <th>Health Risk</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>COW-001</td>
+            <td>Peak</td>
+            <td>12.4</td>
+            <td>Normal</td>
+            <td>Low</td>
+          </tr>
+          <tr>
+            <td>COW-002</td>
+            <td>Mid</td>
+            <td>9.8</td>
+            <td>Below Avg</td>
+            <td>Medium</td>
+          </tr>
+          <tr>
+            <td>COW-003</td>
+            <td>Dry</td>
+            <td>0.0</td>
+            <td>Inactive</td>
+            <td>Low</td>
+          </tr>
+          <tr>
+            <td>COW-004</td>
+            <td>Early</td>
+            <td>7.2</td>
+            <td>Normal</td>
+            <td>Low</td>
+          </tr>
+          <tr>
+            <td>COW-005</td>
+            <td>Peak</td>
+            <td>14.1</td>
+            <td>Above Avg</td>
+            <td>Low</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    
+    <!-- Milk Yield Trend -->
+    <div class="trend-section">
+      <h2>Milk Yield Trend (Last 7 Days)</h2>
+      <div class="chart-container">
+        <div class="chart-bar" style="height: 60%;"></div>
+        <div class="chart-bar" style="height: 75%;"></div>
+        <div class="chart-bar" style="height: 80%;"></div>
+        <div class="chart-bar" style="height: 90%;"></div>
+        <div class="chart-bar" style="height: 85%;"></div>
+        <div class="chart-bar" style="height: 70%;"></div>
+        <div class="chart-bar" style="height: 95%;"></div>
+      </div>
+    </div>
+    
+    <div class="grid-2col">
+      <!-- Health Alerts Panel -->
+      <div class="panel">
+        <h2>Health Alerts</h2>
+        <div class="alert-item alert-high">
+          <strong>High Risk</strong> - COW-002 showing reduced rumination
+        </div>
+        <div class="alert-item alert-medium">
+          <strong>Medium Risk</strong> - COW-007 approaching dry period
+        </div>
+        <div class="alert-item alert-medium">
+          <strong>Medium Risk</strong> - Unusual feeding pattern detected
+        </div>
+      </div>
+      
+      <!-- AI Recommendations Panel -->
+      <div class="panel">
+        <h2>AI Recommendations</h2>
+        <div class="recommendation-item">
+          <strong>Feeding</strong> - Increase concentrate feed for cows in peak lactation
+        </div>
+        <div class="recommendation-item">
+          <strong>Health</strong> - Schedule vet visit for COW-002 due to health indicators
+        </div>
+        <div class="recommendation-item">
+          <strong>Management</strong> - Optimize milking schedule for maximum throughput
+        </div>
+      </div>
+    </div>
+    
+    <!-- Agent Activity Feed -->
+    <div class="panel">
+      <h2>Agent Activity Feed</h2>
+      <div class="activity-item">
+        <strong>Health Agent</strong> - Analyzed cow health metrics, identified 2 concerns
+      </div>
+      <div class="activity-item">
+        <strong>Yield Agent</strong> - Predicted tomorrow's yield: 1,280 L (+2.5%)
+      </div>
+      <div class="activity-item">
+        <strong>Feeding Agent</strong> - Optimized feed distribution for current herd
+      </div>
+      <div class="activity-item">
+        <strong>Sensor Agent</strong> - Verified all sensors operational (98% coverage)
+      </div>
+    </div>
+    
+    <!-- Farm Zones / Sensor Status -->
+    <div class="panel">
+      <h2>Farm Zones & Sensor Status</h2>
+      <div class="zone-status">
+        <div class="zone-card">
+          <div><strong>North Pasture</strong></div>
+          <div>Status: Active</div>
+          <div>Sensors: 8/8</div>
+        </div>
+        <div class="zone-card">
+          <div><strong>South Barn</strong></div>
+          <div>Status: Active</div>
+          <div>Sensors: 12/12</div>
+        </div>
+        <div class="zone-card">
+          <div><strong>East Feeding</strong></div>
+          <div>Status: Active</div>
+          <div>Sensors: 5/5</div>
+        </div>
+        <div class="zone-card">
+          <div><strong>West Milking</strong></div>
+          <div>Status: Active</div>
+          <div>Sensors: 6/6</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  
   <footer>
-    <p>Powered by AGRI-OS - Dark Industrial Operations (Mission Control)</p>
+    <p>AgriTwin Dairy Agentic AI Platform | Generated by AgriTwin Agent Factory | Version: 1.0</p>
+    <p>Real-time monitoring and AI-powered insights for modern dairy operations</p>
   </footer>
 </body>
 </html>`);
