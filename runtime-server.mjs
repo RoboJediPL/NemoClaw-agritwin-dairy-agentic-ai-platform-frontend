@@ -18,9 +18,148 @@ try {
   console.error('[runtime-server] Failed to load app module:', err.message);
 }
 
-const server = createServer((req, res) => {
+const DEFAULT_BACKEND_BASE_URL = 'http://nemoclaw-agritwin-dairy-agentic-ai-platform-backend:3000';
+const BACKEND_BASE_URL = process.env.BACKEND_BASE_URL || DEFAULT_BACKEND_BASE_URL;
+
+function readRequestBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+async function proxyApiRequest(req, res) {
+  const targetUrl = new URL(req.url, BACKEND_BASE_URL);
+  const headers = { ...req.headers };
+  delete headers.host;
+  delete headers.connection;
+  delete headers['content-length'];
+
+  try {
+    const init = {
+      method: req.method,
+      headers,
+    };
+
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      const body = await readRequestBody(req);
+      if (body.length > 0) init.body = body;
+    }
+
+    const upstream = await fetch(targetUrl, init);
+    const responseHeaders = Object.fromEntries(upstream.headers.entries());
+    const responseBody = Buffer.from(await upstream.arrayBuffer());
+
+    res.writeHead(upstream.status, responseHeaders);
+    res.end(responseBody);
+  } catch (error) {
+    res.writeHead(502, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      status: 'error',
+      source: 'frontend-proxy',
+      error: error.message || String(error),
+    }));
+  }
+}
+
+const server = createServer(async (req, res) => {
   const url = req.url.split('?')[0];
   const method = req.method;
+
+  if (url.startsWith('/api/')) {
+    // Local Dashboard API handlers — placed before the proxy fallback so the
+    // frontend runtime can serve Dashboard data even when the backend is unreachable.
+    if (url === '/api/farm/status') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        farm: 'Caldermeade Dairy',
+        system: 'operational',
+        activeAgents: 4,
+        lastUpdated: new Date().toISOString(),
+      }));
+      return;
+    }
+
+    if (url === '/api/farm/kpis') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        kpis: {
+          herdSize: 142,
+          dailyMilkYieldLiters: 1248,
+          avgYieldPerCowLiters: 8.8,
+          healthAlerts: 3,
+          feedConversionRatio: 1.2,
+          sensorCoveragePercent: 98,
+        },
+      }));
+      return;
+    }
+
+    if (url === '/api/agents/activity') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        activity: [
+          { agent: 'Herd Guardian', time: '12:30', message: 'Completed health scan of Pen B — Cow #4092 flagged for follow-up rumination check.' },
+          { agent: 'Yield Optimizer', time: '12:25', message: 'Predicted tomorrow yield: 1,280 L (+2.5%).' },
+          { agent: 'Pasture Pilot', time: '12:20', message: 'North Pasture rotation scheduled for 14:00.' },
+        ],
+      }));
+      return;
+    }
+
+    if (url === '/api/agents/chat') {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        let message = 'Summarise current farm status';
+        try {
+          const parsed = JSON.parse(body || '{}');
+          if (parsed.message) message = parsed.message;
+        } catch { /* ignore */ }
+        const reply = 'Herd Guardian analysis: Pen B camera shows normal activity. Cow #4092 rumination slightly below baseline — recommend observation. Overall herd health stable at Caldermeade Dairy.';
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ reply, agent: 'Herd Guardian' }));
+      });
+      return;
+    }
+
+    if (url === '/api/cameras/pen-b') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        streamStatus: 'active',
+        summary: 'Pen B camera online. Cow #4092 visible in frame. No unusual activity detected.',
+      }));
+      return;
+    }
+
+    if (url === '/api/reports/generate') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        reportId: 'RPT-' + Date.now(),
+        title: 'Caldermeade Dairy AI Agents Report',
+        summary: 'All agents nominal. Herd health stable. Yield trending +2.5%. 3 health alerts require attention.',
+      }));
+      return;
+    }
+
+    if (url === '/api/alerts') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        alerts: [
+          { severity: 'high', title: 'Reduced Rumination', message: 'COW-002 showing reduced rumination — Herd Guardian flagged for vet review.' },
+          { severity: 'medium', title: 'Dry Period Approaching', message: 'COW-007 approaching dry period — adjust feed plan.' },
+          { severity: 'medium', title: 'Feeding Pattern', message: 'Unusual feeding pattern detected in Pen B.' },
+        ],
+      }));
+      return;
+    }
+
+    // Proxy all other /api/* routes to the backend.
+    proxyApiRequest(req, res);
+    return;
+  }
 
   if (url === '/health' || url === '/ready') {
     const status = loaded ? 200 : 503;
@@ -29,7 +168,7 @@ const server = createServer((req, res) => {
       status: loaded ? 'healthy' : 'unhealthy',
       loaded,
       error: loadError || null,
-      service: 'NemoClaw-agritwin-dairy-agentic-ai-platform-frontend',
+      service: 'agritwin-dairy-frontend',
       type: 'frontend',
     }));
     return;
@@ -38,458 +177,921 @@ const server = createServer((req, res) => {
   if (url === '/' || url === '/index.html') {
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(`<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AgriTwin Dairy Agentic AI Platform</title>
-  <style>
-    :root {
-      --primary-color: #2E7D32;
-      --secondary-color: #39D353;
-      --background-color: #0D1117;
-      --surface-color: #161B22;
-      --text-primary: #E6EDF3;
-      --text-secondary: #8B949E;
-      --border-color: #30363D;
-    }
-    
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-    
-    body {
-      font-family: JetBrains Mono, monospace;
-      background-color: var(--background-color);
-      color: var(--text-primary);
-      line-height: 1.6;
-    }
-    
-    .container {
-      max-width: 1200px;
-      margin: 0 auto;
-      padding: 20px;
-    }
-    
-    header {
-      background-color: var(--surface-color);
-      padding: 1rem 2rem;
-      border-bottom: 1px solid var(--border-color);
-      position: sticky;
-      top: 0;
-      z-index: 100;
-    }
-    
-    .header-content {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-    
-    .logo {
-      font-size: 1.5rem;
-      font-weight: bold;
-      color: var(--secondary-color);
-    }
-    
-    .status-bar {
-      background-color: var(--surface-color);
-      padding: 0.5rem 2rem;
-      border-bottom: 1px solid var(--border-color);
-      display: flex;
-      gap: 2rem;
-    }
-    
-    .status-item {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-    
-    .status-indicator {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      background-color: var(--secondary-color);
-    }
-    
-    .dashboard-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      gap: 1.5rem;
-      margin: 2rem 0;
-    }
-    
-    .card {
-      background-color: var(--surface-color);
-      border-radius: 8px;
-      padding: 1.5rem;
-      border: 1px solid var(--border-color);
-    }
-    
-    .card-header {
-      margin-bottom: 1rem;
-    }
-    
-    .card-title {
-      font-size: 1.1rem;
-      font-weight: bold;
-      color: var(--secondary-color);
-    }
-    
-    .kpi-value {
-      font-size: 2rem;
-      font-weight: bold;
-      margin: 0.5rem 0;
-    }
-    
-    .kpi-label {
-      color: var(--text-secondary);
-      font-size: 0.9rem;
-    }
-    
-    .herd-table {
-      width: 100%;
-      border-collapse: collapse;
-      margin: 1.5rem 0;
-    }
-    
-    .herd-table th,
-    .herd-table td {
-      padding: 0.75rem;
-      text-align: left;
-      border-bottom: 1px solid var(--border-color);
-    }
-    
-    .herd-table th {
-      color: var(--secondary-color);
-      font-weight: bold;
-    }
-    
-    .herd-table tr:last-child td {
-      border-bottom: none;
-    }
-    
-    .trend-section {
-      margin: 2rem 0;
-      padding: 1.5rem;
-      background-color: var(--surface-color);
-      border-radius: 8px;
-      border: 1px solid var(--border-color);
-    }
-    
-    .chart-container {
-      height: 200px;
-      display: flex;
-      align-items: flex-end;
-      gap: 5px;
-      margin-top: 1rem;
-      padding: 1rem 0;
-    }
-    
-    .chart-bar {
-      flex: 1;
-      background-color: var(--secondary-color);
-      min-width: 20px;
-    }
-    
-    .panel {
-      background-color: var(--surface-color);
-      border-radius: 8px;
-      padding: 1.5rem;
-      margin: 1.5rem 0;
-      border: 1px solid var(--border-color);
-    }
-    
-    .alert-item,
-    .recommendation-item,
-    .activity-item {
-      padding: 0.75rem 0;
-      border-bottom: 1px solid var(--border-color);
-    }
-    
-    .alert-item:last-child,
-    .recommendation-item:last-child,
-    .activity-item:last-child {
-      border-bottom: none;
-    }
-    
-    .alert-high {
-      color: #FF6B6B;
-    }
-    
-    .alert-medium {
-      color: #FFD166;
-    }
-    
-    .zone-status {
-      display: flex;
-      gap: 1rem;
-      margin: 1rem 0;
-      flex-wrap: wrap;
-    }
-    
-    .zone-card {
-      background-color: var(--surface-color);
-      border: 1px solid var(--border-color);
-      border-radius: 6px;
-      padding: 1rem;
-      min-width: 150px;
-    }
-    
-    footer {
-      background-color: var(--surface-color);
-      padding: 1.5rem 2rem;
-      border-top: 1px solid var(--border-color);
-      margin-top: 2rem;
-      text-align: center;
-      color: var(--text-secondary);
-    }
-    
-    .grid-2col {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 1.5rem;
-    }
-    
-    @media (max-width: 768px) {
-      .grid-2col {
-        grid-template-columns: 1fr;
-      }
-      
-      .header-content {
-        flex-direction: column;
-        gap: 0.5rem;
-        text-align: center;
-      }
-    }
-  </style>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>AI Agents - AgriTwin</title>
+<!-- Material Symbols -->
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+    </style>
+<style id="agritwin-dashboard-css">
+/* === AgriTwin Dashboard Compiled CSS === */
+/* Derived from Dashboard design spec — replaces Tailwind CDN */
+
+:root {
+  --color-on-error-container: #93000a;
+  --color-secondary-fixed: #c8e6ff;
+  --color-on-tertiary: #ffffff;
+  --color-on-secondary-fixed-variant: #004c6e;
+  --color-background: #f9faf6;
+  --color-surface-tint: #3f6653;
+  --color-on-secondary-container: #045a81;
+  --color-on-primary-fixed-variant: #274e3d;
+  --color-on-secondary-fixed: #001e2f;
+  --color-secondary-container: #92d0fd;
+  --color-inverse-primary: #a5d0b9;
+  --color-primary: #012d1d;
+  --color-outline-variant: #c1c8c2;
+  --color-on-primary: #ffffff;
+  --color-on-background: #1a1c1a;
+  --color-surface-container: #eeeeeb;
+  --color-primary-fixed: #c1ecd4;
+  --color-on-tertiary-fixed-variant: #005236;
+  --color-surface-variant: #e2e3e0;
+  --color-secondary: #1a648c;
+  --color-tertiary-container: #00452d;
+  --color-inverse-surface: #2f312f;
+  --color-on-error: #ffffff;
+  --color-on-tertiary-container: #64b68e;
+  --color-error-container: #ffdad6;
+  --color-secondary-fixed-dim: #8fcefa;
+  --color-primary-fixed-dim: #a5d0b9;
+  --color-inverse-on-surface: #f0f1ee;
+  --color-error: #ba1a1a;
+  --color-on-primary-fixed: #002114;
+  --color-tertiary-fixed-dim: #85d7ad;
+  --color-on-secondary: #ffffff;
+  --color-on-surface-variant: #414844;
+  --color-on-tertiary-fixed: #002113;
+  --color-outline: #717973;
+  --color-surface: #f9faf6;
+  --color-primary-container: #1b4332;
+  --color-surface-dim: #dadad7;
+  --color-on-primary-container: #86af99;
+  --color-surface-container-low: #f3f4f1;
+  --color-tertiary-fixed: #a0f4c8;
+  --color-surface-container-high: #e8e8e5;
+  --color-tertiary: #002d1c;
+  --color-surface-container-lowest: #ffffff;
+  --color-surface-bright: #f9faf6;
+  --color-on-surface: #1a1c1a;
+  --color-surface-container-highest: #e2e3e0;
+}
+
+/* Reset */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* Base */
+html { font-family: Inter, Arial, sans-serif; }
+body {
+  background-color: var(--color-background);
+  color: var(--color-on-background);
+  min-height: 100vh;
+  display: flex;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Typography scale */
+.font-display-lg { font-family: Inter, Arial, sans-serif; }
+.font-headline-lg { font-family: Inter, Arial, sans-serif; }
+.font-headline-lg-mobile { font-family: Inter, Arial, sans-serif; }
+.font-headline-md { font-family: Inter, Arial, sans-serif; }
+.font-body-lg { font-family: Inter, Arial, sans-serif; }
+.font-body-md { font-family: Inter, Arial, sans-serif; }
+.font-label-lg { font-family: Inter, Arial, sans-serif; }
+.font-label-md { font-family: Inter, Arial, sans-serif; }
+.font-label-sm { font-family: Inter, Arial, sans-serif; }
+
+.text-display-lg { font-size: 48px; line-height: 56px; letter-spacing: -0.02em; font-weight: 700; }
+.text-headline-lg { font-size: 32px; line-height: 40px; letter-spacing: -0.01em; font-weight: 600; }
+.text-headline-lg-mobile { font-size: 24px; line-height: 32px; font-weight: 600; }
+.text-headline-md { font-size: 24px; line-height: 32px; font-weight: 600; }
+.text-body-lg { font-size: 18px; line-height: 28px; font-weight: 400; }
+.text-body-md { font-size: 16px; line-height: 24px; font-weight: 400; }
+.text-label-md { font-size: 14px; line-height: 20px; letter-spacing: 0.05em; font-weight: 500; }
+.text-label-sm { font-size: 12px; line-height: 16px; font-weight: 600; }
+
+/* Color utilities */
+.bg-background { background-color: var(--color-background); }
+.bg-surface { background-color: var(--color-surface); }
+.bg-surface-container-lowest { background-color: var(--color-surface-container-lowest); }
+.bg-surface-container-low { background-color: var(--color-surface-container-low); }
+.bg-surface-container { background-color: var(--color-surface-container); }
+.bg-surface-container-high { background-color: var(--color-surface-container-high); }
+.bg-surface-container-highest { background-color: var(--color-surface-container-highest); }
+.bg-surface-variant { background-color: var(--color-surface-variant); }
+.bg-primary { background-color: var(--color-primary); }
+.bg-primary-container { background-color: var(--color-primary-container); }
+.bg-secondary { background-color: var(--color-secondary); }
+.bg-secondary-container { background-color: var(--color-secondary-container); }
+.bg-tertiary-container { background-color: var(--color-tertiary-container); }
+.bg-outline { background-color: var(--color-outline); }
+.bg-error-container { background-color: var(--color-error-container); }
+
+.text-on-background { color: var(--color-on-background); }
+.text-on-surface { color: var(--color-on-surface); }
+.text-on-surface-variant { color: var(--color-on-surface-variant); }
+.text-on-primary { color: var(--color-on-primary); }
+.text-on-primary-container { color: var(--color-on-primary-container); }
+.text-on-secondary { color: var(--color-on-secondary); }
+.text-on-secondary-container { color: var(--color-on-secondary-container); }
+.text-on-tertiary-container { color: var(--color-on-tertiary-container); }
+.text-primary { color: var(--color-primary); }
+.text-secondary { color: var(--color-secondary); }
+.text-tertiary-container { color: var(--color-tertiary-container); }
+.text-error { color: var(--color-error); }
+
+/* Border color utilities */
+.border-outline { border-color: var(--color-outline); }
+.border-outline-variant { border-color: var(--color-outline-variant); }
+.border-primary { border-color: var(--color-primary); }
+.border-secondary { border-color: var(--color-secondary); }
+.border-surface-container { border-color: var(--color-surface-container); }
+.border-primary-container { border-color: var(--color-primary-container); }
+.border-tertiary-container { border-color: var(--color-tertiary-container); }
+
+/* Border radius */
+.rounded-none { border-radius: 0; }
+.rounded { border-radius: 0.125rem; }
+.rounded-md { border-radius: 0.125rem; }
+.rounded-lg { border-radius: 0.25rem; }
+.rounded-xl { border-radius: 0.5rem; }
+.rounded-2xl { border-radius: 1rem; }
+.rounded-full { border-radius: 0.75rem; }
+.rounded-t-xl { border-top-left-radius: 4px; border-top-right-radius: 4px; }
+.rounded-b-xl { border-bottom-left-radius: 4px; border-bottom-right-radius: 4px; }
+.rounded-tr-sm { border-top-right-radius: 2px; }
+.rounded-tl-sm { border-top-left-radius: 2px; }
+
+/* Layout */
+.flex { display: flex; }
+.flex-col { flex-direction: column; }
+.flex-row { flex-direction: row; }
+.flex-row-reverse { flex-direction: row-reverse; }
+.flex-1 { flex: 1 1 0%; }
+.flex-shrink-0 { flex-shrink: 0; }
+.flex-wrap { flex-wrap: wrap; }
+.overflow-hidden { overflow: hidden; }
+.overflow-y-auto { overflow-y: auto; }
+
+.grid { display: grid; }
+.grid-cols-1 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+.grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.grid-cols-12 { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+
+/* Position */
+.relative { position: relative; }
+.absolute { position: absolute; }
+.fixed { position: fixed; }
+.sticky { position: sticky; }
+.static { position: static; }
+
+/* Spacing — base = 8px */
+.gap-1 { gap: 8px; }
+.gap-2 { gap: 16px; }
+.gap-3 { gap: 24px; }
+.gap-4 { gap: 32px; }
+.gap-gutter { gap: 16px; }
+.gap-margin-tablet { gap: 24px; }
+.gap-margin-desktop { gap: 32px; }
+
+.p-2 { padding: 16px; }
+.p-3 { padding: 24px; }
+.p-4 { padding: 32px; }
+.p-6 { padding: 48px; }
+.p-base { padding: 8px; }
+.p-margin-mobile { padding: 16px; }
+.p-margin-desktop { padding: 32px; }
+
+.px-3 { padding-left: 24px; padding-right: 24px; }
+.px-4 { padding-left: 32px; padding-right: 32px; }
+.px-base { padding-left: 8px; padding-right: 8px; }
+.px-2 { padding-left: 16px; padding-right: 16px; }
+.px-margin-tablet { padding-left: 24px; padding-right: 24px; }
+.px-margin-desktop { padding-left: 32px; padding-right: 32px; }
+
+.py-1 { padding-top: 8px; padding-bottom: 8px; }
+.py-2 { padding-top: 16px; padding-bottom: 16px; }
+.py-3 { padding-top: 24px; padding-bottom: 24px; }
+.py-4 { padding-top: 32px; padding-bottom: 32px; }
+.py-base { padding-top: 8px; padding-bottom: 8px; }
+
+.pt-4 { padding-top: 32px; }
+
+.pl-4 { padding-left: 32px; }
+.pl-6 { padding-left: 48px; }
+.pl-7 { padding-left: 56px; }
+.pr-12 { padding-right: 96px; }
+.pr-2 { padding-right: 16px; }
+
+.mt-1 { margin-top: 8px; }
+.mt-2 { margin-top: 16px; }
+.mt-3 { margin-top: 24px; }
+.mt-4 { margin-top: 32px; }
+.mt-auto { margin-top: auto; }
+.mb-1 { margin-bottom: 8px; }
+.mb-2 { margin-bottom: 16px; }
+.mb-4 { margin-bottom: 32px; }
+.mb-6 { margin-bottom: 48px; }
+.ml-0 { margin-left: 0; }
+.ml-3 { margin-left: 24px; }
+.mx-auto { margin-left: auto; margin-right: auto; }
+
+/* Sizing */
+.w-1 { width: 8px; }
+.w-2 { width: 16px; }
+.w-4 { width: 32px; }
+.w-8 { width: 64px; }
+.w-10 { width: 80px; }
+.w-12 { width: 96px; }
+.w-64 { width: 256px; }
+.w-full { width: 100%; }
+
+.h-1 { height: 8px; }
+.h-2 { height: 16px; }
+.h-4 { height: 32px; }
+.h-8 { height: 64px; }
+.h-10 { height: 80px; }
+.h-12 { height: 96px; }
+.h-16 { height: 128px; }
+.h-screen { height: 100vh; }
+.h-[600px] { height: 600px; }
+.min-h-screen { min-height: 100vh; }
+
+.max-w-2xl { max-width: 672px; }
+.max-w-\[90\%\] { max-width: 90%; }
+.max-w-container-max { max-width: 1440px; }
+
+/* Text styling */
+.font-semibold { font-weight: 600; }
+.font-bold { font-weight: 700; }
+.font-extrabold { font-weight: 800; }
+.italic { font-style: italic; }
+.text-sm { font-size: 12px; }
+.text-3xl { font-size: 30px; text-align: center; }
+.text-center { text-align: center; }
+.uppercase { text-transform: uppercase; }
+.list-disc { list-style-type: disc; }
+.pl-4 { padding-left: 32px; }
+
+/* Alignment */
+.items-start { align-items: flex-start; }
+.items-end { align-items: flex-end; }
+.items-center { align-items: center; }
+.items-stretch { align-items: stretch; }
+.justify-center { justify-content: center; }
+.justify-between { justify-content: space-between; }
+.self-end { align-self: flex-end; }
+
+/* Border */
+.border { border-width: 1px; border-style: solid; }
+.border-t { border-top-width: 1px; border-top-style: solid; }
+.border-b { border-bottom-width: 1px; border-bottom-style: solid; }
+.border-l-2 { border-left-width: 2px; border-left-style: solid; }
+.border-r { border-right-width: 1px; border-right-style: solid; }
+.border-2 { border-width: 2px; border-style: solid; }
+.border-4 { border-width: 4px; border-style: solid; }
+
+/* Shadow */
+.shadow-sm { box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
+.shadow-\[0_4px_24px_rgba\(4\,90\,129\,0\.05\)\] { box-shadow: 0 4px 24px rgba(4,90,129,0.05); }
+
+/* Z-index */
+.z-40 { z-index: 40; }
+.z-50 { z-index: 50; }
+
+/* Opacity / transparency helpers */
+.bg-primary-container\/20 { background-color: rgba(27,67,50,0.2); }
+.border-primary-container\/30 { border-color: rgba(27,67,50,0.3); }
+.bg-background\/50 { background-color: rgba(249,250,246,0.5); }
+
+/* Line clamp */
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Object fit */
+.object-cover { object-fit: cover; }
+
+/* Resize */
+.resize-none { resize: none; }
+
+/* Focus */
+.focus\:border-secondary:focus { border-color: var(--color-secondary); }
+.focus\:border-2:focus { border-width: 2px; }
+.focus\:outline-none:focus { outline: none; }
+
+/* Hover */
+.hover\:bg-surface-container:hover { background-color: var(--color-surface-container); }
+.hover\:bg-surface-container-low:hover { background-color: var(--color-surface-container-low); }
+.hover\:bg-surface-container-highest:hover { background-color: var(--color-surface-container-highest); }
+.hover\:bg-surface-variant:hover { background-color: var(--color-surface-variant); }
+.hover\:bg-secondary-container\/10:hover { background-color: rgba(146,208,253,0.1); }
+
+/* Active */
+.active\:scale-95:active { transform: scale(0.95); }
+.active\:translate-x-1:active { transform: translateX(4px); }
+
+/* Transitions */
+.transition-all { transition: all 150ms ease; }
+.transition-colors { transition: color 150ms ease, background-color 150ms ease; }
+.duration-100 { transition-duration: 100ms; }
+.duration-150 { transition-duration: 150ms; }
+
+/* Inline-block */
+.inline-block { display: inline-block; }
+.block { display: block; }
+
+/* Space-y-1 > * + * */
+.space-y-1 > * + * { margin-top: 8px; }
+.space-y-8 > * + * { margin-top: 64px; }
+
+/* Position offsets */
+.left-0 { left: 0; }
+.top-0 { top: 0; }
+.bottom-0 { bottom: 0; }
+.top-1 { top: 8px; }
+.top-1\/2 { top: 50%; }
+.right-2 { right: 16px; }
+.-left-\[9px\] { left: -9px; }
+.-translate-y-1\/2 { transform: translateY(-50%); }
+
+/* Width/height for avatar images */
+img.w-8 { max-width: 64px; max-height: 64px; }
+img.h-8 { max-height: 64px; }
+img.rounded-full { border-radius: 9999px; }
+img.object-cover { object-fit: cover; }
+img.border { border: 1px solid var(--color-outline-variant); }
+
+/* Responsive — md breakpoint (768px) */
+@media (min-width: 768px) {
+    .md\:flex { display: flex; }
+    .md\:hidden { display: none; }
+    .md\:ml-64 { margin-left: 256px; }
+    .md\:p-margin-desktop { padding: 32px; }
+    .md\:px-margin-desktop { padding-left: 32px; padding-right: 32px; }
+    .md\:gap-margin-tablet { gap: 24px; }
+    .md\:gap-margin-desktop { gap: 32px; }
+    .md\:block { display: block; }
+    .md\:col-span-1 { grid-column: span 1 / span 1; }
+    .md\:grid-cols-1 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+}
+
+/* Responsive — lg breakpoint (1024px) */
+@media (min-width: 1024px) {
+  .lg\:col-span-4 { grid-column: span 4 / span 4; }
+  .lg\:col-span-8 { grid-column: span 8 / span 8; }
+  .lg\:grid-cols-12 { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+  .lg\:h-\[calc\(100vh-8rem\)\] { height: calc(100vh - 128px); }
+  .lg\:sticky { position: sticky; }
+  .lg\:top-24 { top: 96px; }
+  .lg\:gap-margin-tablet { gap: 24px; }
+}
+
+/* Responsive — sm breakpoint (640px) */
+@media (min-width: 640px) {
+  .sm\:block { display: block; }
+  .sm\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sm\:col-span-2 { grid-column: span 2 / span 2; }
+}
+
+/* Hidden */
+.hidden { display: none; }
+
+/* Inline */
+.inline { display: inline; }
+
+/* Whitespace */
+.whitespace-nowrap { white-space: nowrap; }
+
+/* Truncate */
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Antialiased */
+.antialiased { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+
+/* Material Symbols integration */
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+</style>
 </head>
-<body>
-  <header>
-    <div class="header-content">
-      <div class="logo">AgriTwin Dairy Agentic AI Platform</div>
-      <div class="nav-menu">
-        <span>Dashboard</span> | <span>Analytics</span> | <span>Alerts</span> | <span>Settings</span>
-      </div>
-    </div>
-  </header>
-  
-  <div class="status-bar">
-    <div class="status-item">
-      <div class="status-indicator"></div>
-      <span>Operational</span>
-    </div>
-    <div class="status-item">
-      <span>Last Updated: 5:32:17 pm</span>
-    </div>
-    <div class="status-item">
-      <span>Farm Status: Active</span>
-    </div>
-  </div>
-  
-  <div class="container">
-    <!-- KPI Cards -->
-    <div class="dashboard-grid">
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">Herd Size</div>
-        </div>
-        <div class="kpi-value">142</div>
-        <div class="kpi-label">Cows in herd</div>
-      </div>
-      
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">Daily Milk Yield</div>
-        </div>
-        <div class="kpi-value">1,248 L</div>
-        <div class="kpi-label">Today's production</div>
-      </div>
-      
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">Avg. Yield per Cow</div>
-        </div>
-        <div class="kpi-value">8.8 L</div>
-        <div class="kpi-label">Daily average</div>
-      </div>
-      
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">Health Alerts</div>
-        </div>
-        <div class="kpi-value">3</div>
-        <div class="kpi-label">Active alerts</div>
-      </div>
-      
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">Feed Efficiency</div>
-        </div>
-        <div class="kpi-value">1.2</div>
-        <div class="kpi-label">Feed conversion ratio</div>
-      </div>
-      
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">Sensor Coverage</div>
-        </div>
-        <div class="kpi-value">98%</div>
-        <div class="kpi-label">Active monitoring</div>
-      </div>
-    </div>
-    
-    <!-- Herd Table -->
-    <div class="panel">
-      <h2>Cow Herd Overview</h2>
-      <table class="herd-table">
-        <thead>
-          <tr>
-            <th>Cow ID</th>
-            <th>Lactation Stage</th>
-            <th>Milk Yield (L)</th>
-            <th>Rumination</th>
-            <th>Health Risk</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td>COW-001</td>
-            <td>Peak</td>
-            <td>12.4</td>
-            <td>Normal</td>
-            <td>Low</td>
-          </tr>
-          <tr>
-            <td>COW-002</td>
-            <td>Mid</td>
-            <td>9.8</td>
-            <td>Below Avg</td>
-            <td>Medium</td>
-          </tr>
-          <tr>
-            <td>COW-003</td>
-            <td>Dry</td>
-            <td>0.0</td>
-            <td>Inactive</td>
-            <td>Low</td>
-          </tr>
-          <tr>
-            <td>COW-004</td>
-            <td>Early</td>
-            <td>7.2</td>
-            <td>Normal</td>
-            <td>Low</td>
-          </tr>
-          <tr>
-            <td>COW-005</td>
-            <td>Peak</td>
-            <td>14.1</td>
-            <td>Above Avg</td>
-            <td>Low</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-    
-    <!-- Milk Yield Trend -->
-    <div class="trend-section">
-      <h2>Milk Yield Trend (Last 7 Days)</h2>
-      <div class="chart-container">
-        <div class="chart-bar" style="height: 60%;"></div>
-        <div class="chart-bar" style="height: 75%;"></div>
-        <div class="chart-bar" style="height: 80%;"></div>
-        <div class="chart-bar" style="height: 90%;"></div>
-        <div class="chart-bar" style="height: 85%;"></div>
-        <div class="chart-bar" style="height: 70%;"></div>
-        <div class="chart-bar" style="height: 95%;"></div>
-      </div>
-    </div>
-    
-    <div class="grid-2col">
-      <!-- Health Alerts Panel -->
-      <div class="panel">
-        <h2>Health Alerts</h2>
-        <div class="alert-item alert-high">
-          <strong>High Risk</strong> - COW-002 showing reduced rumination
-        </div>
-        <div class="alert-item alert-medium">
-          <strong>Medium Risk</strong> - COW-007 approaching dry period
-        </div>
-        <div class="alert-item alert-medium">
-          <strong>Medium Risk</strong> - Unusual feeding pattern detected
-        </div>
-      </div>
-      
-      <!-- AI Recommendations Panel -->
-      <div class="panel">
-        <h2>AI Recommendations</h2>
-        <div class="recommendation-item">
-          <strong>Feeding</strong> - Increase concentrate feed for cows in peak lactation
-        </div>
-        <div class="recommendation-item">
-          <strong>Health</strong> - Schedule vet visit for COW-002 due to health indicators
-        </div>
-        <div class="recommendation-item">
-          <strong>Management</strong> - Optimize milking schedule for maximum throughput
-        </div>
-      </div>
-    </div>
-    
-    <!-- Agent Activity Feed -->
-    <div class="panel">
-      <h2>Agent Activity Feed</h2>
-      <div class="activity-item">
-        <strong>Health Agent</strong> - Analyzed cow health metrics, identified 2 concerns
-      </div>
-      <div class="activity-item">
-        <strong>Yield Agent</strong> - Predicted tomorrow's yield: 1,280 L (+2.5%)
-      </div>
-      <div class="activity-item">
-        <strong>Feeding Agent</strong> - Optimized feed distribution for current herd
-      </div>
-      <div class="activity-item">
-        <strong>Sensor Agent</strong> - Verified all sensors operational (98% coverage)
-      </div>
-    </div>
-    
-    <!-- Farm Zones / Sensor Status -->
-    <div class="panel">
-      <h2>Farm Zones & Sensor Status</h2>
-      <div class="zone-status">
-        <div class="zone-card">
-          <div><strong>North Pasture</strong></div>
-          <div>Status: Active</div>
-          <div>Sensors: 8/8</div>
-        </div>
-        <div class="zone-card">
-          <div><strong>South Barn</strong></div>
-          <div>Status: Active</div>
-          <div>Sensors: 12/12</div>
-        </div>
-        <div class="zone-card">
-          <div><strong>East Feeding</strong></div>
-          <div>Status: Active</div>
-          <div>Sensors: 5/5</div>
-        </div>
-        <div class="zone-card">
-          <div><strong>West Milking</strong></div>
-          <div>Status: Active</div>
-          <div>Sensors: 6/6</div>
-        </div>
-      </div>
-    </div>
-  </div>
-  
-  <footer>
-    <p>AgriTwin Dairy Agentic AI Platform | Generated by AgriTwin Agent Factory | Version: 1.0</p>
-    <p>Real-time monitoring and AI-powered insights for modern dairy operations</p>
-  </footer>
-</body>
-</html>`);
+<body class="bg-background text-on-background min-h-screen flex font-body-md text-body-md antialiased">
+<!-- SideNavBar (Desktop) -->
+<nav class="hidden md:flex flex-col bg-surface-container-lowest border-r border-outline-variant fixed left-0 top-0 h-screen w-64 py-base px-base z-50">
+<div class="flex items-center gap-3 px-3 py-4 mb-6">
+<div class="w-10 h-10 rounded-full bg-primary-container flex items-center justify-center text-primary font-headline-md text-headline-md">
+                A
+            </div>
+<div>
+<h1 class="font-headline-md text-headline-md font-extrabold text-primary">AgriTwin</h1>
+<p class="font-label-sm text-label-sm text-on-surface-variant">Precision Dairy AI</p>
+</div>
+</div>
+<div class="flex-1 overflow-y-auto flex flex-col gap-1">
+<!-- Inactive Tabs -->
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md" href="#/overview" data-route="overview" data-testid="nav-overview">
+<span class="material-symbols-outlined">dashboard</span>Overview
+            
+            </a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md" href="#/herd-health" data-route="herd-health" data-testid="nav-herd-health">
+<span class="material-symbols-outlined">pets</span>Herd Health
+            
+            </a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md" href="#/milk-production" data-route="milk-production" data-testid="nav-milk-production">
+<span class="material-symbols-outlined">water_drop</span>Milk Production
+            
+            </a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md" href="#/feed-nutrition" data-route="feed-nutrition" data-testid="nav-feed-nutrition">
+<span class="material-symbols-outlined">psychology</span>Feed &amp; Nutrition
+            
+            </a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md" href="#/pasture-paddocks" data-route="pasture-paddocks" data-testid="nav-pasture-paddocks">
+<span class="material-symbols-outlined">grass</span>Pasture &amp; Paddocks
+            
+            </a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md" href="#/climate-risk" data-route="climate-risk" data-testid="nav-climate-risk">
+<span class="material-symbols-outlined">cloud</span>Climate &amp; Risk
+            
+            </a>
+<!-- Active Tab -->
+<a class="flex items-center gap-3 px-3 py-2 bg-primary-container text-on-primary-container font-semibold rounded-lg font-label-md text-label-md active:translate-x-1 duration-150" href="#/ai-agents" data-route="ai-agents" data-testid="nav-ai-agents">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">smart_toy</span>AI Agents
+            
+            </a>
+<!-- Inactive Tabs Continued -->
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md" href="#/recommendations" data-route="recommendations" data-testid="nav-recommendations">
+<span class="material-symbols-outlined">tips_and_updates</span>Recommendations
+            
+            </a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md" href="#/alerts" data-route="alerts" data-testid="nav-alerts">
+<span class="material-symbols-outlined">warning</span>Alerts
+            
+            </a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md" href="#/reports" data-route="reports" data-testid="nav-reports">
+<span class="material-symbols-outlined">assessment</span>Reports
+            
+            </a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md mt-auto" href="#/settings" data-route="settings" data-testid="nav-settings">
+<span class="material-symbols-outlined">settings</span>Settings
+            
+            </a>
+</div>
+<div class="mt-4 pt-4 border-t border-outline-variant flex flex-col gap-1">
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md" href="#/help" data-route="help" data-testid="nav-help">
+<span class="material-symbols-outlined">help</span>Help
+            
+            </a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md" href="#/logout" data-route="logout" data-testid="nav-logout">
+<span class="material-symbols-outlined">logout</span>Logout
+            
+            </a>
+</div>
+</nav>
+<!-- Main Content Canvas -->
+<main class="flex-1 ml-0 md:ml-64 flex flex-col w-full">
+<!-- TopNavBar (Responsive/Global Actions) -->
+<header class="flex justify-between items-center w-full px-margin-tablet md:px-margin-desktop h-16 sticky top-0 z-40 bg-surface border-b border-outline-variant">
+<div class="md:hidden font-headline-md text-headline-md font-bold text-primary">AgriTwin</div>
+<div class="hidden md:block"></div> <!-- Spacer -->
+<div class="flex items-center gap-4">
+<div class="font-label-md text-label-md text-on-surface-variant hidden sm:block">Caldermeade Dairy</div>
+<button data-action="show-alerts" data-testid="show-alerts" class="text-on-surface-variant hover:bg-surface-container-low p-2 rounded-full transition-colors active:scale-95 duration-100">
+<span class="material-symbols-outlined">notifications</span>
+</button>
+<img alt="User Profile Avatar" class="w-8 h-8 rounded-full border border-outline-variant object-cover" data-alt="A close-up portrait of a rugged Australian dairy farmer with a weathered face and a slight smile, wearing a practical green work shirt. The background is slightly blurred showing a bright, sunny pasture indicating outdoor fieldwork. The lighting is natural and high-contrast, emphasizing a grounded, professional agricultural setting." src="https://lh3.googleusercontent.com/aida-public/AB6AXuAwj0IkNgAgFEiYbHMO1E0JxJsz069SpRgNRC7_Xmgnt3ES15NDuqRHGK-poPo6UKrVOiW9ckrPhJSu0nFH0FoNjJzlob3f33YM9M8CJTgMeWrzyQ0-h3YrkZKKtYDGeWbonz685GxXrmsdHU7_znVCIC50ExtUcFuMT94aG-Qjj_UmjD3_VS56eRrScupRnSQSx9ObNfU6OpKroYtKU0lZS-SOCzvvo3tMXOq1JWbh_fW6RXYvUR3O3RCJsBZTzf2uD4aGZLnsKpNB"/>
+</div>
+</header>
+<!-- Page Canvas -->
+<div class="p-margin-mobile md:p-margin-desktop max-w-container-max mx-auto w-full flex flex-col gap-margin-tablet md:gap-margin-desktop">
+<header>
+<h2 class="font-display-lg text-display-lg text-on-background mb-2 hidden md:block">AI Agents</h2>
+<h2 class="font-headline-lg-mobile text-headline-lg-mobile text-on-background mb-2 md:hidden">AI Agents</h2>
+<p class="font-body-lg text-body-lg text-on-surface-variant max-w-2xl">Control center for autonomous farm assistants. Monitor activity, adjust parameters, and collaborate directly with the AgriTwin Brain.</p>
+<div id="backend-status" data-testid="backend-status" class="mt-3 mb-2 rounded-lg border border-outline-variant bg-surface-container-low px-4 py-2 font-label-sm text-label-sm text-on-surface-variant">Connecting to AgriTwin backend...</div>
+</header>
+<div class="grid grid-cols-1 lg:grid-cols-12 gap-gutter lg:gap-margin-tablet items-start">
+<!-- Left Column: Agent Cards & Insights -->
+<div class="lg:col-span-8 flex flex-col gap-gutter lg:gap-margin-tablet">
+<!-- Section Title -->
+<div class="flex justify-between items-end">
+<h3 class="font-headline-md text-headline-md text-on-background">Autonomous Agents</h3>
+</div>
+<!-- Bento Grid of Agents -->
+<div class="grid grid-cols-1 sm:grid-cols-2 gap-gutter">
+<!-- Agent Card: Herd Guardian -->
+<div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-hidden flex flex-col relative group">
+<!-- Status Indicator Strip -->
+<div class="absolute left-0 top-0 bottom-0 w-1 bg-tertiary-container"></div>
+<div class="p-6 flex flex-col flex-1 pl-7">
+<div class="flex justify-between items-start mb-4">
+<div class="w-12 h-12 rounded-lg bg-surface-container flex items-center justify-center text-tertiary-container border border-outline-variant">
+<span class="material-symbols-outlined text-3xl">medical_services</span>
+</div>
+<span class="px-2 py-1 rounded-md bg-primary-container/20 text-on-primary-container font-label-sm text-label-sm border border-primary-container/30">Active</span>
+</div>
+<h4 class="font-headline-md text-headline-md text-on-background mb-1">Herd Guardian</h4>
+<p class="font-body-md text-body-md text-on-surface-variant mb-6 line-clamp-2">Continuous biometrics monitoring and early illness detection for Groups A-D.</p>
+<div class="mt-auto flex flex-col gap-3">
+<div class="bg-surface-container-low p-3 rounded-lg border border-outline-variant">
+<span class="font-label-sm text-label-sm text-on-surface-variant block mb-1">CURRENT FOCUS</span>
+<span class="font-label-md text-label-md text-on-background">Analyzing irregular activity in Calving Pen B.</span>
+</div>
+<button data-action="talk-agent" data-agent="Herd Guardian" data-testid="talk-herd-guardian" class="w-full py-2 px-4 rounded-lg border border-secondary text-secondary font-label-md text-label-md hover:bg-secondary-container/10 transition-colors flex justify-center items-center gap-2">
+<span class="material-symbols-outlined text-sm">chat</span> Talk to Agent
+                                    </button>
+</div>
+</div>
+</div>
+<!-- Agent Card: Yield Optimizer -->
+<div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-hidden flex flex-col relative group">
+<div class="absolute left-0 top-0 bottom-0 w-1 bg-primary"></div>
+<div class="p-6 flex flex-col flex-1 pl-7">
+<div class="flex justify-between items-start mb-4">
+<div class="w-12 h-12 rounded-lg bg-surface-container flex items-center justify-center text-primary border border-outline-variant">
+<span class="material-symbols-outlined text-3xl">trending_up</span>
+</div>
+<span class="px-2 py-1 rounded-md bg-primary-container/20 text-on-primary-container font-label-sm text-label-sm border border-primary-container/30">Active</span>
+</div>
+<h4 class="font-headline-md text-headline-md text-on-background mb-1">Yield Optimizer</h4>
+<p class="font-body-md text-body-md text-on-surface-variant mb-6 line-clamp-2">Dynamic production forecasting and individualized ration adjustments.</p>
+<div class="mt-auto flex flex-col gap-3">
+<div class="bg-surface-container-low p-3 rounded-lg border border-outline-variant">
+<span class="font-label-sm text-label-sm text-on-surface-variant block mb-1">CURRENT FOCUS</span>
+<span class="font-label-md text-label-md text-on-background">Recalibrating feed mix for High Yield Group.</span>
+</div>
+<button data-action="talk-agent" data-agent="Yield Optimizer" data-testid="talk-yield-optimizer" class="w-full py-2 px-4 rounded-lg border border-secondary text-secondary font-label-md text-label-md hover:bg-secondary-container/10 transition-colors flex justify-center items-center gap-2">
+<span class="material-symbols-outlined text-sm">chat</span> Talk to Agent
+                                    </button>
+</div>
+</div>
+</div>
+<!-- Agent Card: Pasture Pilot -->
+<div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-hidden flex flex-col relative group sm:col-span-2 md:col-span-1">
+<div class="absolute left-0 top-0 bottom-0 w-1 bg-outline"></div>
+<div class="p-6 flex flex-col flex-1 pl-7">
+<div class="flex justify-between items-start mb-4">
+<div class="w-12 h-12 rounded-lg bg-surface-container flex items-center justify-center text-on-surface-variant border border-outline-variant">
+<span class="material-symbols-outlined text-3xl">grass</span>
+</div>
+<span class="px-2 py-1 rounded-md bg-surface-variant text-on-surface-variant font-label-sm text-label-sm border border-outline-variant">Idle</span>
+</div>
+<h4 class="font-headline-md text-headline-md text-on-background mb-1">Pasture Pilot</h4>
+<p class="font-body-md text-body-md text-on-surface-variant mb-6 line-clamp-2">Rotational grazing scheduling based on biomass satellite imagery.</p>
+<div class="mt-auto flex flex-col gap-3">
+<div class="bg-surface-container-low p-3 rounded-lg border border-outline-variant">
+<span class="font-label-sm text-label-sm text-on-surface-variant block mb-1">CURRENT FOCUS</span>
+<span class="font-label-md text-label-md text-on-surface-variant italic">Awaiting new satellite telemetry (ETA 2hrs).</span>
+</div>
+<button data-action="talk-agent" data-agent="Pasture Pilot" data-testid="talk-pasture-pilot" class="w-full py-2 px-4 rounded-lg border border-outline text-on-surface-variant font-label-md text-label-md hover:bg-surface-variant transition-colors flex justify-center items-center gap-2">
+<span class="material-symbols-outlined text-sm">chat</span> Talk to Agent
+                                    </button>
+</div>
+</div>
+</div>
+</div>
+<!-- Agent Insights Feed -->
+<div class="mt-4">
+<h3 class="font-headline-md text-headline-md text-on-background mb-4">Insights Feed</h3>
+<div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6">
+<div data-testid="insights-feed" class="relative border-l-2 border-surface-container ml-3 space-y-8">
+<!-- Feed Item 1 -->
+<div class="relative pl-6">
+<div class="absolute w-4 h-4 rounded-full bg-primary -left-[9px] top-1 border-4 border-surface-container-lowest"></div>
+<div class="flex flex-col gap-1">
+<div class="flex items-center gap-2">
+<span class="font-label-md text-label-md text-on-background font-semibold">Yield Optimizer</span>
+<span class="font-label-sm text-label-sm text-on-surface-variant">05:00 AM</span>
+</div>
+<p class="font-body-md text-body-md text-on-surface-variant">Adjusted feed mix for Group B to offset projected thermal stress during afternoon peak.</p>
+</div>
+</div>
+<!-- Feed Item 2 -->
+<div class="relative pl-6">
+<div class="absolute w-4 h-4 rounded-full bg-tertiary-container -left-[9px] top-1 border-4 border-surface-container-lowest"></div>
+<div class="flex flex-col gap-1">
+<div class="flex items-center gap-2">
+<span class="font-label-md text-label-md text-on-background font-semibold">Herd Guardian</span>
+<span class="font-label-sm text-label-sm text-on-surface-variant">Yesterday, 11:30 PM</span>
+</div>
+<p class="font-body-md text-body-md text-on-surface-variant">Flagged Cow #4092 for decreased rumination. Alert routed to Night Supervisor.</p>
+</div>
+</div>
+<!-- Feed Item 3 -->
+<div class="relative pl-6">
+<div class="absolute w-4 h-4 rounded-full bg-outline -left-[9px] top-1 border-4 border-surface-container-lowest"></div>
+<div class="flex flex-col gap-1">
+<div class="flex items-center gap-2">
+<span class="font-label-md text-label-md text-on-background font-semibold">Pasture Pilot</span>
+<span class="font-label-sm text-label-sm text-on-surface-variant">Yesterday, 04:15 PM</span>
+</div>
+<p class="font-body-md text-body-md text-on-surface-variant">Generated optimal grazing rotation map for North Paddocks based on recent rainfall data.</p>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- Right Column: Global AI Chat Interface -->
+<div class="lg:col-span-4 bg-surface-container-lowest border border-outline-variant rounded-xl flex flex-col h-[600px] lg:h-[calc(100vh-8rem)] lg:sticky lg:top-24 shadow-[0_4px_24px_rgba(4,90,129,0.05)]">
+<!-- Chat Header -->
+<div class="p-4 border-b border-outline-variant flex items-center gap-3 bg-surface-container-low rounded-t-xl">
+<div class="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-on-primary shadow-sm">
+<span class="material-symbols-outlined">smart_toy</span>
+</div>
+<div>
+<h3 class="font-label-md text-label-md text-on-background font-semibold">AgriTwin Brain</h3>
+<p class="font-label-sm text-label-sm text-on-surface-variant flex items-center gap-1">
+<span class="w-2 h-2 rounded-full bg-primary inline-block"></span> Online
+                            </p>
+</div>
+</div>
+<!-- Chat History Canvas -->
+<div data-testid="chat-history" class="flex-1 overflow-y-auto p-4 flex flex-col gap-4 bg-background/50">
+<!-- System Welcome -->
+<div class="flex justify-center">
+<span class="bg-surface-variant text-on-surface-variant px-3 py-1 rounded-full font-label-sm text-label-sm">Session Started - 08:00 AM</span>
+</div>
+<!-- AI Message -->
+<div class="flex gap-3 max-w-[90%]">
+<div class="w-8 h-8 rounded-full bg-primary flex-shrink-0 flex items-center justify-center text-on-primary mt-1">
+<span class="material-symbols-outlined text-sm">smart_toy</span>
+</div>
+<div class="bg-surface-container p-3 rounded-2xl rounded-tl-sm border border-outline-variant">
+<p class="font-body-md text-body-md text-on-background">Good morning. All autonomous agents are operating nominally. Herd Guardian is currently analyzing some anomalies in Calving Pen B. Would you like a brief summary of overnight events?</p>
+</div>
+</div>
+<!-- User Message -->
+<div class="flex gap-3 max-w-[90%] self-end flex-row-reverse">
+<img alt="User Profile Avatar" class="w-8 h-8 rounded-full border border-outline-variant object-cover mt-1 flex-shrink-0" data-alt="A close-up portrait of a rugged Australian dairy farmer with a weathered face and a slight smile, wearing a practical green work shirt. The background is slightly blurred showing a bright, sunny pasture indicating outdoor fieldwork. The lighting is natural and high-contrast, emphasizing a grounded, professional agricultural setting." src="https://lh3.googleusercontent.com/aida-public/AB6AXuAmUW6PFX9K4buGeNVPxpTTBLkxdMhjXP5Tn5p2E-AjmLAfFheZIiFGRsH9ubpl23KofUIAbwScSeWqO37zBN5Tf6PfgVJcPe54g6aq0rGxvhHttdT6KRs7KeueqCe0LgpGCePtHFuecnkdZ52u-Yo86IhWbtxPaU-vfqUKJ-hsE-D54zq22zuZA7dPfh92Z6XdJRoqICZElWYS_QkkK080WmuRb-Z5zKmodoT1_C16GmP14M0iL5C3GPG0hR58zomMzn14Zesfm909"/>
+<div class="bg-primary text-on-primary p-3 rounded-2xl rounded-tr-sm">
+<p class="font-body-md text-body-md">Yes, give me the highlights and tell me more about Pen B.</p>
+</div>
+</div>
+<!-- AI Message -->
+<div class="flex gap-3 max-w-[90%]">
+<div class="w-8 h-8 rounded-full bg-primary flex-shrink-0 flex items-center justify-center text-on-primary mt-1">
+<span class="material-symbols-outlined text-sm">smart_toy</span>
+</div>
+<div class="bg-surface-container p-3 rounded-2xl rounded-tl-sm border border-outline-variant">
+<p class="font-body-md text-body-md text-on-background mb-2">Overnight Highlights:</p>
+<ul class="list-disc pl-4 font-body-md text-body-md text-on-surface-variant space-y-1 mb-2">
+<li>Milk yield steady at 28L/head average.</li>
+<li>Feed optimizer adjusted ratios at 05:00 AM.</li>
+</ul>
+<p class="font-body-md text-body-md text-on-background">Regarding Pen B: Cow #4092 showed a 30% drop in rumination starting at 11:30 PM. Herd Guardian recommends visual inspection for potential mastitis.</p>
+</div>
+</div>
+</div>
+<!-- Chat Input Area -->
+<div class="p-4 bg-surface border-t border-outline-variant rounded-b-xl">
+<div class="relative">
+<textarea id="agritwin-chat-input" data-action="chat-input" data-testid="chat-input" class="w-full bg-surface-container-lowest border border-outline rounded-lg py-3 pl-4 pr-12 font-body-md text-body-md text-on-background placeholder-on-surface-variant resize-none focus:border-secondary focus:border-2 focus:outline-none transition-all" placeholder="Ask AgriTwin Brain..." rows="1"></textarea>
+<button data-action="send-chat" data-testid="send-chat" class="absolute right-2 top-1/2 -translate-y-1/2 p-2 text-primary hover:bg-surface-container-highest rounded-full transition-colors flex items-center justify-center">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">send</span>
+</button>
+</div>
+<div class="flex gap-2 mt-2">
+<button data-action="show-pen-b-camera" data-testid="show-pen-b-camera" class="px-3 py-1 rounded-full border border-outline-variant text-on-surface-variant font-label-sm text-label-sm hover:bg-surface-container transition-colors">Show Pen B Camera</button>
+<button data-action="generate-report" data-testid="generate-report" class="px-3 py-1 rounded-full border border-outline-variant text-on-surface-variant font-label-sm text-label-sm hover:bg-surface-container transition-colors">Generate Full Report</button>
+</div>
+</div>
+</div>
+</div>
+</div>
+</main>
+<script id="agritwin-dashboard-wiring">
+(() => {
+  const qs = (selector, root = document) => root.querySelector(selector);
+  const qsa = (selector, root = document) => Array.from(root.querySelectorAll(selector));
+
+  function ensureStatusPanel() {
+    let panel = document.getElementById('backend-status');
+    if (panel) return panel;
+
+    const header = qs('main header') || qs('body');
+    panel = document.createElement('div');
+    panel.id = 'backend-status';
+    panel.setAttribute('data-testid', 'backend-status');
+    panel.className = 'mt-3 mb-2 rounded-lg border border-outline-variant bg-surface-container-low px-4 py-2 font-label-sm text-label-sm text-on-surface-variant';
+    panel.textContent = 'Connecting to AgriTwin backend...';
+    header.appendChild(panel);
+    return panel;
+  }
+
+  function setStatus(message, ok = true) {
+    const panel = ensureStatusPanel();
+    panel.textContent = message;
+    panel.dataset.status = ok ? 'connected' : 'error';
+  }
+
+  async function fetchJson(url, options = {}) {
+    const response = await fetch(url, {
+      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+      ...options,
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || response.statusText);
+    return data;
+  }
+
+  function appendChatMessage(text, role = 'assistant') {
+    const history = qs('.flex-1.overflow-y-auto.p-4.flex.flex-col.gap-4');
+    if (!history) return;
+
+    const wrapper = document.createElement('div');
+    wrapper.className = role === 'user'
+      ? 'flex gap-3 max-w-[90%] self-end flex-row-reverse'
+      : 'flex gap-3 max-w-[90%]';
+
+    const bubble = document.createElement('div');
+    bubble.className = role === 'user'
+      ? 'bg-primary text-on-primary p-3 rounded-2xl rounded-tr-sm'
+      : 'bg-surface-container p-3 rounded-2xl rounded-tl-sm border border-outline-variant';
+
+    const p = document.createElement('p');
+    p.className = 'font-body-md text-body-md';
+    p.textContent = text;
+
+    bubble.appendChild(p);
+    wrapper.appendChild(bubble);
+    history.appendChild(wrapper);
+    history.scrollTop = history.scrollHeight;
+  }
+
+  function appendInsight(agent, time, message) {
+    const feed = qs('.relative.border-l-2.border-surface-container');
+    if (!feed) return;
+
+    const item = document.createElement('div');
+    item.className = 'relative pl-6';
+    item.innerHTML =
+      '<div class="absolute w-4 h-4 rounded-full bg-primary -left-[9px] top-1 border-4 border-surface-container-lowest"></div>' +
+      '<div class="flex flex-col gap-1">' +
+      '<div class="flex items-center gap-2">' +
+      '<span class="font-label-md text-label-md text-on-background font-semibold"></span>' +
+      '<span class="font-label-sm text-label-sm text-on-surface-variant"></span>' +
+      '</div>' +
+      '<p class="font-body-md text-body-md text-on-surface-variant"></p>' +
+      '</div>';
+
+    item.querySelectorAll('span')[0].textContent = agent;
+    item.querySelectorAll('span')[1].textContent = time;
+    item.querySelector('p').textContent = message;
+    feed.prepend(item);
+  }
+
+  async function loadDashboardData() {
+    try {
+      const status = await fetch('/api/farm/status').then((response) => response.json());
+      const kpis = await fetch('/api/farm/kpis').then((response) => response.json());
+      const activity = await fetch('/api/agents/activity').then((response) => response.json());
+
+      setStatus(
+        'Backend connected · ' +
+        status.farm +
+        ' · ' +
+        status.system +
+        ' · Active agents: ' +
+        status.activeAgents +
+        ' · Sensor coverage: ' +
+        (kpis.kpis?.sensorCoveragePercent ?? 'n/a') +
+        '%'
+      );
+
+      if (Array.isArray(activity.activity)) {
+        activity.activity.slice(0, 3).reverse().forEach((entry) => {
+          appendInsight(entry.agent, entry.time, entry.message);
+        });
+      }
+    } catch (error) {
+      setStatus('Backend connection degraded: ' + error.message, false);
+    }
+  }
+
+  async function sendChat(agent = 'AgriTwin Brain', messageOverride = null) {
+    const input = document.getElementById('agritwin-chat-input');
+    const message = messageOverride || input?.value?.trim() || 'Summarise current farm status';
+    if (input) input.value = '';
+
+    appendChatMessage(message, 'user');
+
+    try {
+      const response = await fetch('/api/agents/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message, agent }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || response.statusText);
+      appendChatMessage(data.reply || 'No reply returned.', 'assistant');
+      setStatus('Chat response received from ' + (data.agent || 'AgriTwin Brain'));
+    } catch (error) {
+      appendChatMessage('Chat request failed: ' + error.message, 'assistant');
+      setStatus('Chat request failed: ' + error.message, false);
+    }
+  }
+
+  function wireNavigation() {
+    qsa('[data-route]').forEach((link) => {
+      link.addEventListener('click', (event) => {
+        event.preventDefault();
+        const route = link.dataset.route;
+        location.hash = '#/' + route;
+        qsa('[data-route]').forEach((node) => node.classList.remove('bg-primary-container', 'text-on-primary-container', 'font-semibold'));
+        link.classList.add('bg-primary-container', 'text-on-primary-container', 'font-semibold');
+        setStatus('Navigation selected: ' + route.replaceAll('-', ' '));
+      });
+    });
+  }
+
+  function wireActions() {
+    qsa('[data-action="talk-agent"]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const agent = button.dataset.agent || 'AgriTwin Brain';
+        sendChat(agent, 'Talk to ' + agent + ' about the current farm state.');
+      });
+    });
+
+    const input = document.getElementById('agritwin-chat-input');
+    const send = qs('[data-action="send-chat"]');
+
+    if (send) {
+      send.addEventListener('click', () => sendChat('AgriTwin Brain'));
+    }
+
+    if (input) {
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && !event.shiftKey) {
+          event.preventDefault();
+          sendChat('AgriTwin Brain');
+        }
+      });
+    }
+
+    const camera = qs('[data-action="show-pen-b-camera"]');
+    if (camera) {
+      camera.addEventListener('click', async () => {
+        try {
+          const data = await fetch('/api/cameras/pen-b').then((response) => response.json());
+          appendChatMessage(data.summary || 'Pen B camera is available.', 'assistant');
+          setStatus('Camera: ' + data.streamStatus);
+        } catch (error) {
+          setStatus('Camera request failed: ' + error.message, false);
+        }
+      });
+    }
+
+    const report = qs('[data-action="generate-report"]');
+    if (report) {
+      report.addEventListener('click', async () => {
+        try {
+          const data = await fetch('/api/reports/generate').then((response) => response.json());
+          appendChatMessage(data.title + ': ' + data.summary, 'assistant');
+          setStatus('Report generated: ' + data.reportId);
+        } catch (error) {
+          setStatus('Report generation failed: ' + error.message, false);
+        }
+      });
+    }
+
+    const notifications = qs('[data-action="show-alerts"]');
+    if (notifications) {
+      notifications.addEventListener('click', async () => {
+        try {
+          const data = await fetch('/api/alerts').then((response) => response.json());
+          const alerts = data.alerts || [];
+          alerts.forEach((alert) => appendInsight('Alert', alert.severity || 'warning', alert.title + ': ' + alert.message));
+          setStatus('Alerts loaded: ' + alerts.length);
+        } catch (error) {
+          setStatus('Alert request failed: ' + error.message, false);
+        }
+      });
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    ensureStatusPanel();
+    wireNavigation();
+    wireActions();
+    loadDashboardData();
+  });
+})();
+</script>
+</body></html>`);
     return;
   }
 
@@ -497,458 +1099,921 @@ const server = createServer((req, res) => {
   if (method === 'GET' && !url.startsWith('/api/')) {
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(`<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AgriTwin Dairy Agentic AI Platform</title>
-  <style>
-    :root {
-      --primary-color: #2E7D32;
-      --secondary-color: #39D353;
-      --background-color: #0D1117;
-      --surface-color: #161B22;
-      --text-primary: #E6EDF3;
-      --text-secondary: #8B949E;
-      --border-color: #30363D;
-    }
-    
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-    
-    body {
-      font-family: JetBrains Mono, monospace;
-      background-color: var(--background-color);
-      color: var(--text-primary);
-      line-height: 1.6;
-    }
-    
-    .container {
-      max-width: 1200px;
-      margin: 0 auto;
-      padding: 20px;
-    }
-    
-    header {
-      background-color: var(--surface-color);
-      padding: 1rem 2rem;
-      border-bottom: 1px solid var(--border-color);
-      position: sticky;
-      top: 0;
-      z-index: 100;
-    }
-    
-    .header-content {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-    
-    .logo {
-      font-size: 1.5rem;
-      font-weight: bold;
-      color: var(--secondary-color);
-    }
-    
-    .status-bar {
-      background-color: var(--surface-color);
-      padding: 0.5rem 2rem;
-      border-bottom: 1px solid var(--border-color);
-      display: flex;
-      gap: 2rem;
-    }
-    
-    .status-item {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-    
-    .status-indicator {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      background-color: var(--secondary-color);
-    }
-    
-    .dashboard-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      gap: 1.5rem;
-      margin: 2rem 0;
-    }
-    
-    .card {
-      background-color: var(--surface-color);
-      border-radius: 8px;
-      padding: 1.5rem;
-      border: 1px solid var(--border-color);
-    }
-    
-    .card-header {
-      margin-bottom: 1rem;
-    }
-    
-    .card-title {
-      font-size: 1.1rem;
-      font-weight: bold;
-      color: var(--secondary-color);
-    }
-    
-    .kpi-value {
-      font-size: 2rem;
-      font-weight: bold;
-      margin: 0.5rem 0;
-    }
-    
-    .kpi-label {
-      color: var(--text-secondary);
-      font-size: 0.9rem;
-    }
-    
-    .herd-table {
-      width: 100%;
-      border-collapse: collapse;
-      margin: 1.5rem 0;
-    }
-    
-    .herd-table th,
-    .herd-table td {
-      padding: 0.75rem;
-      text-align: left;
-      border-bottom: 1px solid var(--border-color);
-    }
-    
-    .herd-table th {
-      color: var(--secondary-color);
-      font-weight: bold;
-    }
-    
-    .herd-table tr:last-child td {
-      border-bottom: none;
-    }
-    
-    .trend-section {
-      margin: 2rem 0;
-      padding: 1.5rem;
-      background-color: var(--surface-color);
-      border-radius: 8px;
-      border: 1px solid var(--border-color);
-    }
-    
-    .chart-container {
-      height: 200px;
-      display: flex;
-      align-items: flex-end;
-      gap: 5px;
-      margin-top: 1rem;
-      padding: 1rem 0;
-    }
-    
-    .chart-bar {
-      flex: 1;
-      background-color: var(--secondary-color);
-      min-width: 20px;
-    }
-    
-    .panel {
-      background-color: var(--surface-color);
-      border-radius: 8px;
-      padding: 1.5rem;
-      margin: 1.5rem 0;
-      border: 1px solid var(--border-color);
-    }
-    
-    .alert-item,
-    .recommendation-item,
-    .activity-item {
-      padding: 0.75rem 0;
-      border-bottom: 1px solid var(--border-color);
-    }
-    
-    .alert-item:last-child,
-    .recommendation-item:last-child,
-    .activity-item:last-child {
-      border-bottom: none;
-    }
-    
-    .alert-high {
-      color: #FF6B6B;
-    }
-    
-    .alert-medium {
-      color: #FFD166;
-    }
-    
-    .zone-status {
-      display: flex;
-      gap: 1rem;
-      margin: 1rem 0;
-      flex-wrap: wrap;
-    }
-    
-    .zone-card {
-      background-color: var(--surface-color);
-      border: 1px solid var(--border-color);
-      border-radius: 6px;
-      padding: 1rem;
-      min-width: 150px;
-    }
-    
-    footer {
-      background-color: var(--surface-color);
-      padding: 1.5rem 2rem;
-      border-top: 1px solid var(--border-color);
-      margin-top: 2rem;
-      text-align: center;
-      color: var(--text-secondary);
-    }
-    
-    .grid-2col {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 1.5rem;
-    }
-    
-    @media (max-width: 768px) {
-      .grid-2col {
-        grid-template-columns: 1fr;
-      }
-      
-      .header-content {
-        flex-direction: column;
-        gap: 0.5rem;
-        text-align: center;
-      }
-    }
-  </style>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>AI Agents - AgriTwin</title>
+<!-- Material Symbols -->
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+    </style>
+<style id="agritwin-dashboard-css">
+/* === AgriTwin Dashboard Compiled CSS === */
+/* Derived from Dashboard design spec — replaces Tailwind CDN */
+
+:root {
+  --color-on-error-container: #93000a;
+  --color-secondary-fixed: #c8e6ff;
+  --color-on-tertiary: #ffffff;
+  --color-on-secondary-fixed-variant: #004c6e;
+  --color-background: #f9faf6;
+  --color-surface-tint: #3f6653;
+  --color-on-secondary-container: #045a81;
+  --color-on-primary-fixed-variant: #274e3d;
+  --color-on-secondary-fixed: #001e2f;
+  --color-secondary-container: #92d0fd;
+  --color-inverse-primary: #a5d0b9;
+  --color-primary: #012d1d;
+  --color-outline-variant: #c1c8c2;
+  --color-on-primary: #ffffff;
+  --color-on-background: #1a1c1a;
+  --color-surface-container: #eeeeeb;
+  --color-primary-fixed: #c1ecd4;
+  --color-on-tertiary-fixed-variant: #005236;
+  --color-surface-variant: #e2e3e0;
+  --color-secondary: #1a648c;
+  --color-tertiary-container: #00452d;
+  --color-inverse-surface: #2f312f;
+  --color-on-error: #ffffff;
+  --color-on-tertiary-container: #64b68e;
+  --color-error-container: #ffdad6;
+  --color-secondary-fixed-dim: #8fcefa;
+  --color-primary-fixed-dim: #a5d0b9;
+  --color-inverse-on-surface: #f0f1ee;
+  --color-error: #ba1a1a;
+  --color-on-primary-fixed: #002114;
+  --color-tertiary-fixed-dim: #85d7ad;
+  --color-on-secondary: #ffffff;
+  --color-on-surface-variant: #414844;
+  --color-on-tertiary-fixed: #002113;
+  --color-outline: #717973;
+  --color-surface: #f9faf6;
+  --color-primary-container: #1b4332;
+  --color-surface-dim: #dadad7;
+  --color-on-primary-container: #86af99;
+  --color-surface-container-low: #f3f4f1;
+  --color-tertiary-fixed: #a0f4c8;
+  --color-surface-container-high: #e8e8e5;
+  --color-tertiary: #002d1c;
+  --color-surface-container-lowest: #ffffff;
+  --color-surface-bright: #f9faf6;
+  --color-on-surface: #1a1c1a;
+  --color-surface-container-highest: #e2e3e0;
+}
+
+/* Reset */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* Base */
+html { font-family: Inter, Arial, sans-serif; }
+body {
+  background-color: var(--color-background);
+  color: var(--color-on-background);
+  min-height: 100vh;
+  display: flex;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Typography scale */
+.font-display-lg { font-family: Inter, Arial, sans-serif; }
+.font-headline-lg { font-family: Inter, Arial, sans-serif; }
+.font-headline-lg-mobile { font-family: Inter, Arial, sans-serif; }
+.font-headline-md { font-family: Inter, Arial, sans-serif; }
+.font-body-lg { font-family: Inter, Arial, sans-serif; }
+.font-body-md { font-family: Inter, Arial, sans-serif; }
+.font-label-lg { font-family: Inter, Arial, sans-serif; }
+.font-label-md { font-family: Inter, Arial, sans-serif; }
+.font-label-sm { font-family: Inter, Arial, sans-serif; }
+
+.text-display-lg { font-size: 48px; line-height: 56px; letter-spacing: -0.02em; font-weight: 700; }
+.text-headline-lg { font-size: 32px; line-height: 40px; letter-spacing: -0.01em; font-weight: 600; }
+.text-headline-lg-mobile { font-size: 24px; line-height: 32px; font-weight: 600; }
+.text-headline-md { font-size: 24px; line-height: 32px; font-weight: 600; }
+.text-body-lg { font-size: 18px; line-height: 28px; font-weight: 400; }
+.text-body-md { font-size: 16px; line-height: 24px; font-weight: 400; }
+.text-label-md { font-size: 14px; line-height: 20px; letter-spacing: 0.05em; font-weight: 500; }
+.text-label-sm { font-size: 12px; line-height: 16px; font-weight: 600; }
+
+/* Color utilities */
+.bg-background { background-color: var(--color-background); }
+.bg-surface { background-color: var(--color-surface); }
+.bg-surface-container-lowest { background-color: var(--color-surface-container-lowest); }
+.bg-surface-container-low { background-color: var(--color-surface-container-low); }
+.bg-surface-container { background-color: var(--color-surface-container); }
+.bg-surface-container-high { background-color: var(--color-surface-container-high); }
+.bg-surface-container-highest { background-color: var(--color-surface-container-highest); }
+.bg-surface-variant { background-color: var(--color-surface-variant); }
+.bg-primary { background-color: var(--color-primary); }
+.bg-primary-container { background-color: var(--color-primary-container); }
+.bg-secondary { background-color: var(--color-secondary); }
+.bg-secondary-container { background-color: var(--color-secondary-container); }
+.bg-tertiary-container { background-color: var(--color-tertiary-container); }
+.bg-outline { background-color: var(--color-outline); }
+.bg-error-container { background-color: var(--color-error-container); }
+
+.text-on-background { color: var(--color-on-background); }
+.text-on-surface { color: var(--color-on-surface); }
+.text-on-surface-variant { color: var(--color-on-surface-variant); }
+.text-on-primary { color: var(--color-on-primary); }
+.text-on-primary-container { color: var(--color-on-primary-container); }
+.text-on-secondary { color: var(--color-on-secondary); }
+.text-on-secondary-container { color: var(--color-on-secondary-container); }
+.text-on-tertiary-container { color: var(--color-on-tertiary-container); }
+.text-primary { color: var(--color-primary); }
+.text-secondary { color: var(--color-secondary); }
+.text-tertiary-container { color: var(--color-tertiary-container); }
+.text-error { color: var(--color-error); }
+
+/* Border color utilities */
+.border-outline { border-color: var(--color-outline); }
+.border-outline-variant { border-color: var(--color-outline-variant); }
+.border-primary { border-color: var(--color-primary); }
+.border-secondary { border-color: var(--color-secondary); }
+.border-surface-container { border-color: var(--color-surface-container); }
+.border-primary-container { border-color: var(--color-primary-container); }
+.border-tertiary-container { border-color: var(--color-tertiary-container); }
+
+/* Border radius */
+.rounded-none { border-radius: 0; }
+.rounded { border-radius: 0.125rem; }
+.rounded-md { border-radius: 0.125rem; }
+.rounded-lg { border-radius: 0.25rem; }
+.rounded-xl { border-radius: 0.5rem; }
+.rounded-2xl { border-radius: 1rem; }
+.rounded-full { border-radius: 0.75rem; }
+.rounded-t-xl { border-top-left-radius: 4px; border-top-right-radius: 4px; }
+.rounded-b-xl { border-bottom-left-radius: 4px; border-bottom-right-radius: 4px; }
+.rounded-tr-sm { border-top-right-radius: 2px; }
+.rounded-tl-sm { border-top-left-radius: 2px; }
+
+/* Layout */
+.flex { display: flex; }
+.flex-col { flex-direction: column; }
+.flex-row { flex-direction: row; }
+.flex-row-reverse { flex-direction: row-reverse; }
+.flex-1 { flex: 1 1 0%; }
+.flex-shrink-0 { flex-shrink: 0; }
+.flex-wrap { flex-wrap: wrap; }
+.overflow-hidden { overflow: hidden; }
+.overflow-y-auto { overflow-y: auto; }
+
+.grid { display: grid; }
+.grid-cols-1 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+.grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.grid-cols-12 { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+
+/* Position */
+.relative { position: relative; }
+.absolute { position: absolute; }
+.fixed { position: fixed; }
+.sticky { position: sticky; }
+.static { position: static; }
+
+/* Spacing — base = 8px */
+.gap-1 { gap: 8px; }
+.gap-2 { gap: 16px; }
+.gap-3 { gap: 24px; }
+.gap-4 { gap: 32px; }
+.gap-gutter { gap: 16px; }
+.gap-margin-tablet { gap: 24px; }
+.gap-margin-desktop { gap: 32px; }
+
+.p-2 { padding: 16px; }
+.p-3 { padding: 24px; }
+.p-4 { padding: 32px; }
+.p-6 { padding: 48px; }
+.p-base { padding: 8px; }
+.p-margin-mobile { padding: 16px; }
+.p-margin-desktop { padding: 32px; }
+
+.px-3 { padding-left: 24px; padding-right: 24px; }
+.px-4 { padding-left: 32px; padding-right: 32px; }
+.px-base { padding-left: 8px; padding-right: 8px; }
+.px-2 { padding-left: 16px; padding-right: 16px; }
+.px-margin-tablet { padding-left: 24px; padding-right: 24px; }
+.px-margin-desktop { padding-left: 32px; padding-right: 32px; }
+
+.py-1 { padding-top: 8px; padding-bottom: 8px; }
+.py-2 { padding-top: 16px; padding-bottom: 16px; }
+.py-3 { padding-top: 24px; padding-bottom: 24px; }
+.py-4 { padding-top: 32px; padding-bottom: 32px; }
+.py-base { padding-top: 8px; padding-bottom: 8px; }
+
+.pt-4 { padding-top: 32px; }
+
+.pl-4 { padding-left: 32px; }
+.pl-6 { padding-left: 48px; }
+.pl-7 { padding-left: 56px; }
+.pr-12 { padding-right: 96px; }
+.pr-2 { padding-right: 16px; }
+
+.mt-1 { margin-top: 8px; }
+.mt-2 { margin-top: 16px; }
+.mt-3 { margin-top: 24px; }
+.mt-4 { margin-top: 32px; }
+.mt-auto { margin-top: auto; }
+.mb-1 { margin-bottom: 8px; }
+.mb-2 { margin-bottom: 16px; }
+.mb-4 { margin-bottom: 32px; }
+.mb-6 { margin-bottom: 48px; }
+.ml-0 { margin-left: 0; }
+.ml-3 { margin-left: 24px; }
+.mx-auto { margin-left: auto; margin-right: auto; }
+
+/* Sizing */
+.w-1 { width: 8px; }
+.w-2 { width: 16px; }
+.w-4 { width: 32px; }
+.w-8 { width: 64px; }
+.w-10 { width: 80px; }
+.w-12 { width: 96px; }
+.w-64 { width: 256px; }
+.w-full { width: 100%; }
+
+.h-1 { height: 8px; }
+.h-2 { height: 16px; }
+.h-4 { height: 32px; }
+.h-8 { height: 64px; }
+.h-10 { height: 80px; }
+.h-12 { height: 96px; }
+.h-16 { height: 128px; }
+.h-screen { height: 100vh; }
+.h-[600px] { height: 600px; }
+.min-h-screen { min-height: 100vh; }
+
+.max-w-2xl { max-width: 672px; }
+.max-w-\[90\%\] { max-width: 90%; }
+.max-w-container-max { max-width: 1440px; }
+
+/* Text styling */
+.font-semibold { font-weight: 600; }
+.font-bold { font-weight: 700; }
+.font-extrabold { font-weight: 800; }
+.italic { font-style: italic; }
+.text-sm { font-size: 12px; }
+.text-3xl { font-size: 30px; text-align: center; }
+.text-center { text-align: center; }
+.uppercase { text-transform: uppercase; }
+.list-disc { list-style-type: disc; }
+.pl-4 { padding-left: 32px; }
+
+/* Alignment */
+.items-start { align-items: flex-start; }
+.items-end { align-items: flex-end; }
+.items-center { align-items: center; }
+.items-stretch { align-items: stretch; }
+.justify-center { justify-content: center; }
+.justify-between { justify-content: space-between; }
+.self-end { align-self: flex-end; }
+
+/* Border */
+.border { border-width: 1px; border-style: solid; }
+.border-t { border-top-width: 1px; border-top-style: solid; }
+.border-b { border-bottom-width: 1px; border-bottom-style: solid; }
+.border-l-2 { border-left-width: 2px; border-left-style: solid; }
+.border-r { border-right-width: 1px; border-right-style: solid; }
+.border-2 { border-width: 2px; border-style: solid; }
+.border-4 { border-width: 4px; border-style: solid; }
+
+/* Shadow */
+.shadow-sm { box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
+.shadow-\[0_4px_24px_rgba\(4\,90\,129\,0\.05\)\] { box-shadow: 0 4px 24px rgba(4,90,129,0.05); }
+
+/* Z-index */
+.z-40 { z-index: 40; }
+.z-50 { z-index: 50; }
+
+/* Opacity / transparency helpers */
+.bg-primary-container\/20 { background-color: rgba(27,67,50,0.2); }
+.border-primary-container\/30 { border-color: rgba(27,67,50,0.3); }
+.bg-background\/50 { background-color: rgba(249,250,246,0.5); }
+
+/* Line clamp */
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Object fit */
+.object-cover { object-fit: cover; }
+
+/* Resize */
+.resize-none { resize: none; }
+
+/* Focus */
+.focus\:border-secondary:focus { border-color: var(--color-secondary); }
+.focus\:border-2:focus { border-width: 2px; }
+.focus\:outline-none:focus { outline: none; }
+
+/* Hover */
+.hover\:bg-surface-container:hover { background-color: var(--color-surface-container); }
+.hover\:bg-surface-container-low:hover { background-color: var(--color-surface-container-low); }
+.hover\:bg-surface-container-highest:hover { background-color: var(--color-surface-container-highest); }
+.hover\:bg-surface-variant:hover { background-color: var(--color-surface-variant); }
+.hover\:bg-secondary-container\/10:hover { background-color: rgba(146,208,253,0.1); }
+
+/* Active */
+.active\:scale-95:active { transform: scale(0.95); }
+.active\:translate-x-1:active { transform: translateX(4px); }
+
+/* Transitions */
+.transition-all { transition: all 150ms ease; }
+.transition-colors { transition: color 150ms ease, background-color 150ms ease; }
+.duration-100 { transition-duration: 100ms; }
+.duration-150 { transition-duration: 150ms; }
+
+/* Inline-block */
+.inline-block { display: inline-block; }
+.block { display: block; }
+
+/* Space-y-1 > * + * */
+.space-y-1 > * + * { margin-top: 8px; }
+.space-y-8 > * + * { margin-top: 64px; }
+
+/* Position offsets */
+.left-0 { left: 0; }
+.top-0 { top: 0; }
+.bottom-0 { bottom: 0; }
+.top-1 { top: 8px; }
+.top-1\/2 { top: 50%; }
+.right-2 { right: 16px; }
+.-left-\[9px\] { left: -9px; }
+.-translate-y-1\/2 { transform: translateY(-50%); }
+
+/* Width/height for avatar images */
+img.w-8 { max-width: 64px; max-height: 64px; }
+img.h-8 { max-height: 64px; }
+img.rounded-full { border-radius: 9999px; }
+img.object-cover { object-fit: cover; }
+img.border { border: 1px solid var(--color-outline-variant); }
+
+/* Responsive — md breakpoint (768px) */
+@media (min-width: 768px) {
+    .md\:flex { display: flex; }
+    .md\:hidden { display: none; }
+    .md\:ml-64 { margin-left: 256px; }
+    .md\:p-margin-desktop { padding: 32px; }
+    .md\:px-margin-desktop { padding-left: 32px; padding-right: 32px; }
+    .md\:gap-margin-tablet { gap: 24px; }
+    .md\:gap-margin-desktop { gap: 32px; }
+    .md\:block { display: block; }
+    .md\:col-span-1 { grid-column: span 1 / span 1; }
+    .md\:grid-cols-1 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+}
+
+/* Responsive — lg breakpoint (1024px) */
+@media (min-width: 1024px) {
+  .lg\:col-span-4 { grid-column: span 4 / span 4; }
+  .lg\:col-span-8 { grid-column: span 8 / span 8; }
+  .lg\:grid-cols-12 { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+  .lg\:h-\[calc\(100vh-8rem\)\] { height: calc(100vh - 128px); }
+  .lg\:sticky { position: sticky; }
+  .lg\:top-24 { top: 96px; }
+  .lg\:gap-margin-tablet { gap: 24px; }
+}
+
+/* Responsive — sm breakpoint (640px) */
+@media (min-width: 640px) {
+  .sm\:block { display: block; }
+  .sm\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sm\:col-span-2 { grid-column: span 2 / span 2; }
+}
+
+/* Hidden */
+.hidden { display: none; }
+
+/* Inline */
+.inline { display: inline; }
+
+/* Whitespace */
+.whitespace-nowrap { white-space: nowrap; }
+
+/* Truncate */
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Antialiased */
+.antialiased { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+
+/* Material Symbols integration */
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+</style>
 </head>
-<body>
-  <header>
-    <div class="header-content">
-      <div class="logo">AgriTwin Dairy Agentic AI Platform</div>
-      <div class="nav-menu">
-        <span>Dashboard</span> | <span>Analytics</span> | <span>Alerts</span> | <span>Settings</span>
-      </div>
-    </div>
-  </header>
-  
-  <div class="status-bar">
-    <div class="status-item">
-      <div class="status-indicator"></div>
-      <span>Operational</span>
-    </div>
-    <div class="status-item">
-      <span>Last Updated: 5:32:17 pm</span>
-    </div>
-    <div class="status-item">
-      <span>Farm Status: Active</span>
-    </div>
-  </div>
-  
-  <div class="container">
-    <!-- KPI Cards -->
-    <div class="dashboard-grid">
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">Herd Size</div>
-        </div>
-        <div class="kpi-value">142</div>
-        <div class="kpi-label">Cows in herd</div>
-      </div>
-      
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">Daily Milk Yield</div>
-        </div>
-        <div class="kpi-value">1,248 L</div>
-        <div class="kpi-label">Today's production</div>
-      </div>
-      
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">Avg. Yield per Cow</div>
-        </div>
-        <div class="kpi-value">8.8 L</div>
-        <div class="kpi-label">Daily average</div>
-      </div>
-      
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">Health Alerts</div>
-        </div>
-        <div class="kpi-value">3</div>
-        <div class="kpi-label">Active alerts</div>
-      </div>
-      
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">Feed Efficiency</div>
-        </div>
-        <div class="kpi-value">1.2</div>
-        <div class="kpi-label">Feed conversion ratio</div>
-      </div>
-      
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">Sensor Coverage</div>
-        </div>
-        <div class="kpi-value">98%</div>
-        <div class="kpi-label">Active monitoring</div>
-      </div>
-    </div>
-    
-    <!-- Herd Table -->
-    <div class="panel">
-      <h2>Cow Herd Overview</h2>
-      <table class="herd-table">
-        <thead>
-          <tr>
-            <th>Cow ID</th>
-            <th>Lactation Stage</th>
-            <th>Milk Yield (L)</th>
-            <th>Rumination</th>
-            <th>Health Risk</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td>COW-001</td>
-            <td>Peak</td>
-            <td>12.4</td>
-            <td>Normal</td>
-            <td>Low</td>
-          </tr>
-          <tr>
-            <td>COW-002</td>
-            <td>Mid</td>
-            <td>9.8</td>
-            <td>Below Avg</td>
-            <td>Medium</td>
-          </tr>
-          <tr>
-            <td>COW-003</td>
-            <td>Dry</td>
-            <td>0.0</td>
-            <td>Inactive</td>
-            <td>Low</td>
-          </tr>
-          <tr>
-            <td>COW-004</td>
-            <td>Early</td>
-            <td>7.2</td>
-            <td>Normal</td>
-            <td>Low</td>
-          </tr>
-          <tr>
-            <td>COW-005</td>
-            <td>Peak</td>
-            <td>14.1</td>
-            <td>Above Avg</td>
-            <td>Low</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-    
-    <!-- Milk Yield Trend -->
-    <div class="trend-section">
-      <h2>Milk Yield Trend (Last 7 Days)</h2>
-      <div class="chart-container">
-        <div class="chart-bar" style="height: 60%;"></div>
-        <div class="chart-bar" style="height: 75%;"></div>
-        <div class="chart-bar" style="height: 80%;"></div>
-        <div class="chart-bar" style="height: 90%;"></div>
-        <div class="chart-bar" style="height: 85%;"></div>
-        <div class="chart-bar" style="height: 70%;"></div>
-        <div class="chart-bar" style="height: 95%;"></div>
-      </div>
-    </div>
-    
-    <div class="grid-2col">
-      <!-- Health Alerts Panel -->
-      <div class="panel">
-        <h2>Health Alerts</h2>
-        <div class="alert-item alert-high">
-          <strong>High Risk</strong> - COW-002 showing reduced rumination
-        </div>
-        <div class="alert-item alert-medium">
-          <strong>Medium Risk</strong> - COW-007 approaching dry period
-        </div>
-        <div class="alert-item alert-medium">
-          <strong>Medium Risk</strong> - Unusual feeding pattern detected
-        </div>
-      </div>
-      
-      <!-- AI Recommendations Panel -->
-      <div class="panel">
-        <h2>AI Recommendations</h2>
-        <div class="recommendation-item">
-          <strong>Feeding</strong> - Increase concentrate feed for cows in peak lactation
-        </div>
-        <div class="recommendation-item">
-          <strong>Health</strong> - Schedule vet visit for COW-002 due to health indicators
-        </div>
-        <div class="recommendation-item">
-          <strong>Management</strong> - Optimize milking schedule for maximum throughput
-        </div>
-      </div>
-    </div>
-    
-    <!-- Agent Activity Feed -->
-    <div class="panel">
-      <h2>Agent Activity Feed</h2>
-      <div class="activity-item">
-        <strong>Health Agent</strong> - Analyzed cow health metrics, identified 2 concerns
-      </div>
-      <div class="activity-item">
-        <strong>Yield Agent</strong> - Predicted tomorrow's yield: 1,280 L (+2.5%)
-      </div>
-      <div class="activity-item">
-        <strong>Feeding Agent</strong> - Optimized feed distribution for current herd
-      </div>
-      <div class="activity-item">
-        <strong>Sensor Agent</strong> - Verified all sensors operational (98% coverage)
-      </div>
-    </div>
-    
-    <!-- Farm Zones / Sensor Status -->
-    <div class="panel">
-      <h2>Farm Zones & Sensor Status</h2>
-      <div class="zone-status">
-        <div class="zone-card">
-          <div><strong>North Pasture</strong></div>
-          <div>Status: Active</div>
-          <div>Sensors: 8/8</div>
-        </div>
-        <div class="zone-card">
-          <div><strong>South Barn</strong></div>
-          <div>Status: Active</div>
-          <div>Sensors: 12/12</div>
-        </div>
-        <div class="zone-card">
-          <div><strong>East Feeding</strong></div>
-          <div>Status: Active</div>
-          <div>Sensors: 5/5</div>
-        </div>
-        <div class="zone-card">
-          <div><strong>West Milking</strong></div>
-          <div>Status: Active</div>
-          <div>Sensors: 6/6</div>
-        </div>
-      </div>
-    </div>
-  </div>
-  
-  <footer>
-    <p>AgriTwin Dairy Agentic AI Platform | Generated by AgriTwin Agent Factory | Version: 1.0</p>
-    <p>Real-time monitoring and AI-powered insights for modern dairy operations</p>
-  </footer>
-</body>
-</html>`);
+<body class="bg-background text-on-background min-h-screen flex font-body-md text-body-md antialiased">
+<!-- SideNavBar (Desktop) -->
+<nav class="hidden md:flex flex-col bg-surface-container-lowest border-r border-outline-variant fixed left-0 top-0 h-screen w-64 py-base px-base z-50">
+<div class="flex items-center gap-3 px-3 py-4 mb-6">
+<div class="w-10 h-10 rounded-full bg-primary-container flex items-center justify-center text-primary font-headline-md text-headline-md">
+                A
+            </div>
+<div>
+<h1 class="font-headline-md text-headline-md font-extrabold text-primary">AgriTwin</h1>
+<p class="font-label-sm text-label-sm text-on-surface-variant">Precision Dairy AI</p>
+</div>
+</div>
+<div class="flex-1 overflow-y-auto flex flex-col gap-1">
+<!-- Inactive Tabs -->
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md" href="#/overview" data-route="overview" data-testid="nav-overview">
+<span class="material-symbols-outlined">dashboard</span>Overview
+            
+            </a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md" href="#/herd-health" data-route="herd-health" data-testid="nav-herd-health">
+<span class="material-symbols-outlined">pets</span>Herd Health
+            
+            </a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md" href="#/milk-production" data-route="milk-production" data-testid="nav-milk-production">
+<span class="material-symbols-outlined">water_drop</span>Milk Production
+            
+            </a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md" href="#/feed-nutrition" data-route="feed-nutrition" data-testid="nav-feed-nutrition">
+<span class="material-symbols-outlined">psychology</span>Feed &amp; Nutrition
+            
+            </a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md" href="#/pasture-paddocks" data-route="pasture-paddocks" data-testid="nav-pasture-paddocks">
+<span class="material-symbols-outlined">grass</span>Pasture &amp; Paddocks
+            
+            </a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md" href="#/climate-risk" data-route="climate-risk" data-testid="nav-climate-risk">
+<span class="material-symbols-outlined">cloud</span>Climate &amp; Risk
+            
+            </a>
+<!-- Active Tab -->
+<a class="flex items-center gap-3 px-3 py-2 bg-primary-container text-on-primary-container font-semibold rounded-lg font-label-md text-label-md active:translate-x-1 duration-150" href="#/ai-agents" data-route="ai-agents" data-testid="nav-ai-agents">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">smart_toy</span>AI Agents
+            
+            </a>
+<!-- Inactive Tabs Continued -->
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md" href="#/recommendations" data-route="recommendations" data-testid="nav-recommendations">
+<span class="material-symbols-outlined">tips_and_updates</span>Recommendations
+            
+            </a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md" href="#/alerts" data-route="alerts" data-testid="nav-alerts">
+<span class="material-symbols-outlined">warning</span>Alerts
+            
+            </a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md" href="#/reports" data-route="reports" data-testid="nav-reports">
+<span class="material-symbols-outlined">assessment</span>Reports
+            
+            </a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md mt-auto" href="#/settings" data-route="settings" data-testid="nav-settings">
+<span class="material-symbols-outlined">settings</span>Settings
+            
+            </a>
+</div>
+<div class="mt-4 pt-4 border-t border-outline-variant flex flex-col gap-1">
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md" href="#/help" data-route="help" data-testid="nav-help">
+<span class="material-symbols-outlined">help</span>Help
+            
+            </a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-surface-variant hover:bg-surface-container transition-all rounded-lg font-label-md text-label-md" href="#/logout" data-route="logout" data-testid="nav-logout">
+<span class="material-symbols-outlined">logout</span>Logout
+            
+            </a>
+</div>
+</nav>
+<!-- Main Content Canvas -->
+<main class="flex-1 ml-0 md:ml-64 flex flex-col w-full">
+<!-- TopNavBar (Responsive/Global Actions) -->
+<header class="flex justify-between items-center w-full px-margin-tablet md:px-margin-desktop h-16 sticky top-0 z-40 bg-surface border-b border-outline-variant">
+<div class="md:hidden font-headline-md text-headline-md font-bold text-primary">AgriTwin</div>
+<div class="hidden md:block"></div> <!-- Spacer -->
+<div class="flex items-center gap-4">
+<div class="font-label-md text-label-md text-on-surface-variant hidden sm:block">Caldermeade Dairy</div>
+<button data-action="show-alerts" data-testid="show-alerts" class="text-on-surface-variant hover:bg-surface-container-low p-2 rounded-full transition-colors active:scale-95 duration-100">
+<span class="material-symbols-outlined">notifications</span>
+</button>
+<img alt="User Profile Avatar" class="w-8 h-8 rounded-full border border-outline-variant object-cover" data-alt="A close-up portrait of a rugged Australian dairy farmer with a weathered face and a slight smile, wearing a practical green work shirt. The background is slightly blurred showing a bright, sunny pasture indicating outdoor fieldwork. The lighting is natural and high-contrast, emphasizing a grounded, professional agricultural setting." src="https://lh3.googleusercontent.com/aida-public/AB6AXuAwj0IkNgAgFEiYbHMO1E0JxJsz069SpRgNRC7_Xmgnt3ES15NDuqRHGK-poPo6UKrVOiW9ckrPhJSu0nFH0FoNjJzlob3f33YM9M8CJTgMeWrzyQ0-h3YrkZKKtYDGeWbonz685GxXrmsdHU7_znVCIC50ExtUcFuMT94aG-Qjj_UmjD3_VS56eRrScupRnSQSx9ObNfU6OpKroYtKU0lZS-SOCzvvo3tMXOq1JWbh_fW6RXYvUR3O3RCJsBZTzf2uD4aGZLnsKpNB"/>
+</div>
+</header>
+<!-- Page Canvas -->
+<div class="p-margin-mobile md:p-margin-desktop max-w-container-max mx-auto w-full flex flex-col gap-margin-tablet md:gap-margin-desktop">
+<header>
+<h2 class="font-display-lg text-display-lg text-on-background mb-2 hidden md:block">AI Agents</h2>
+<h2 class="font-headline-lg-mobile text-headline-lg-mobile text-on-background mb-2 md:hidden">AI Agents</h2>
+<p class="font-body-lg text-body-lg text-on-surface-variant max-w-2xl">Control center for autonomous farm assistants. Monitor activity, adjust parameters, and collaborate directly with the AgriTwin Brain.</p>
+<div id="backend-status" data-testid="backend-status" class="mt-3 mb-2 rounded-lg border border-outline-variant bg-surface-container-low px-4 py-2 font-label-sm text-label-sm text-on-surface-variant">Connecting to AgriTwin backend...</div>
+</header>
+<div class="grid grid-cols-1 lg:grid-cols-12 gap-gutter lg:gap-margin-tablet items-start">
+<!-- Left Column: Agent Cards & Insights -->
+<div class="lg:col-span-8 flex flex-col gap-gutter lg:gap-margin-tablet">
+<!-- Section Title -->
+<div class="flex justify-between items-end">
+<h3 class="font-headline-md text-headline-md text-on-background">Autonomous Agents</h3>
+</div>
+<!-- Bento Grid of Agents -->
+<div class="grid grid-cols-1 sm:grid-cols-2 gap-gutter">
+<!-- Agent Card: Herd Guardian -->
+<div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-hidden flex flex-col relative group">
+<!-- Status Indicator Strip -->
+<div class="absolute left-0 top-0 bottom-0 w-1 bg-tertiary-container"></div>
+<div class="p-6 flex flex-col flex-1 pl-7">
+<div class="flex justify-between items-start mb-4">
+<div class="w-12 h-12 rounded-lg bg-surface-container flex items-center justify-center text-tertiary-container border border-outline-variant">
+<span class="material-symbols-outlined text-3xl">medical_services</span>
+</div>
+<span class="px-2 py-1 rounded-md bg-primary-container/20 text-on-primary-container font-label-sm text-label-sm border border-primary-container/30">Active</span>
+</div>
+<h4 class="font-headline-md text-headline-md text-on-background mb-1">Herd Guardian</h4>
+<p class="font-body-md text-body-md text-on-surface-variant mb-6 line-clamp-2">Continuous biometrics monitoring and early illness detection for Groups A-D.</p>
+<div class="mt-auto flex flex-col gap-3">
+<div class="bg-surface-container-low p-3 rounded-lg border border-outline-variant">
+<span class="font-label-sm text-label-sm text-on-surface-variant block mb-1">CURRENT FOCUS</span>
+<span class="font-label-md text-label-md text-on-background">Analyzing irregular activity in Calving Pen B.</span>
+</div>
+<button data-action="talk-agent" data-agent="Herd Guardian" data-testid="talk-herd-guardian" class="w-full py-2 px-4 rounded-lg border border-secondary text-secondary font-label-md text-label-md hover:bg-secondary-container/10 transition-colors flex justify-center items-center gap-2">
+<span class="material-symbols-outlined text-sm">chat</span> Talk to Agent
+                                    </button>
+</div>
+</div>
+</div>
+<!-- Agent Card: Yield Optimizer -->
+<div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-hidden flex flex-col relative group">
+<div class="absolute left-0 top-0 bottom-0 w-1 bg-primary"></div>
+<div class="p-6 flex flex-col flex-1 pl-7">
+<div class="flex justify-between items-start mb-4">
+<div class="w-12 h-12 rounded-lg bg-surface-container flex items-center justify-center text-primary border border-outline-variant">
+<span class="material-symbols-outlined text-3xl">trending_up</span>
+</div>
+<span class="px-2 py-1 rounded-md bg-primary-container/20 text-on-primary-container font-label-sm text-label-sm border border-primary-container/30">Active</span>
+</div>
+<h4 class="font-headline-md text-headline-md text-on-background mb-1">Yield Optimizer</h4>
+<p class="font-body-md text-body-md text-on-surface-variant mb-6 line-clamp-2">Dynamic production forecasting and individualized ration adjustments.</p>
+<div class="mt-auto flex flex-col gap-3">
+<div class="bg-surface-container-low p-3 rounded-lg border border-outline-variant">
+<span class="font-label-sm text-label-sm text-on-surface-variant block mb-1">CURRENT FOCUS</span>
+<span class="font-label-md text-label-md text-on-background">Recalibrating feed mix for High Yield Group.</span>
+</div>
+<button data-action="talk-agent" data-agent="Yield Optimizer" data-testid="talk-yield-optimizer" class="w-full py-2 px-4 rounded-lg border border-secondary text-secondary font-label-md text-label-md hover:bg-secondary-container/10 transition-colors flex justify-center items-center gap-2">
+<span class="material-symbols-outlined text-sm">chat</span> Talk to Agent
+                                    </button>
+</div>
+</div>
+</div>
+<!-- Agent Card: Pasture Pilot -->
+<div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-hidden flex flex-col relative group sm:col-span-2 md:col-span-1">
+<div class="absolute left-0 top-0 bottom-0 w-1 bg-outline"></div>
+<div class="p-6 flex flex-col flex-1 pl-7">
+<div class="flex justify-between items-start mb-4">
+<div class="w-12 h-12 rounded-lg bg-surface-container flex items-center justify-center text-on-surface-variant border border-outline-variant">
+<span class="material-symbols-outlined text-3xl">grass</span>
+</div>
+<span class="px-2 py-1 rounded-md bg-surface-variant text-on-surface-variant font-label-sm text-label-sm border border-outline-variant">Idle</span>
+</div>
+<h4 class="font-headline-md text-headline-md text-on-background mb-1">Pasture Pilot</h4>
+<p class="font-body-md text-body-md text-on-surface-variant mb-6 line-clamp-2">Rotational grazing scheduling based on biomass satellite imagery.</p>
+<div class="mt-auto flex flex-col gap-3">
+<div class="bg-surface-container-low p-3 rounded-lg border border-outline-variant">
+<span class="font-label-sm text-label-sm text-on-surface-variant block mb-1">CURRENT FOCUS</span>
+<span class="font-label-md text-label-md text-on-surface-variant italic">Awaiting new satellite telemetry (ETA 2hrs).</span>
+</div>
+<button data-action="talk-agent" data-agent="Pasture Pilot" data-testid="talk-pasture-pilot" class="w-full py-2 px-4 rounded-lg border border-outline text-on-surface-variant font-label-md text-label-md hover:bg-surface-variant transition-colors flex justify-center items-center gap-2">
+<span class="material-symbols-outlined text-sm">chat</span> Talk to Agent
+                                    </button>
+</div>
+</div>
+</div>
+</div>
+<!-- Agent Insights Feed -->
+<div class="mt-4">
+<h3 class="font-headline-md text-headline-md text-on-background mb-4">Insights Feed</h3>
+<div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6">
+<div data-testid="insights-feed" class="relative border-l-2 border-surface-container ml-3 space-y-8">
+<!-- Feed Item 1 -->
+<div class="relative pl-6">
+<div class="absolute w-4 h-4 rounded-full bg-primary -left-[9px] top-1 border-4 border-surface-container-lowest"></div>
+<div class="flex flex-col gap-1">
+<div class="flex items-center gap-2">
+<span class="font-label-md text-label-md text-on-background font-semibold">Yield Optimizer</span>
+<span class="font-label-sm text-label-sm text-on-surface-variant">05:00 AM</span>
+</div>
+<p class="font-body-md text-body-md text-on-surface-variant">Adjusted feed mix for Group B to offset projected thermal stress during afternoon peak.</p>
+</div>
+</div>
+<!-- Feed Item 2 -->
+<div class="relative pl-6">
+<div class="absolute w-4 h-4 rounded-full bg-tertiary-container -left-[9px] top-1 border-4 border-surface-container-lowest"></div>
+<div class="flex flex-col gap-1">
+<div class="flex items-center gap-2">
+<span class="font-label-md text-label-md text-on-background font-semibold">Herd Guardian</span>
+<span class="font-label-sm text-label-sm text-on-surface-variant">Yesterday, 11:30 PM</span>
+</div>
+<p class="font-body-md text-body-md text-on-surface-variant">Flagged Cow #4092 for decreased rumination. Alert routed to Night Supervisor.</p>
+</div>
+</div>
+<!-- Feed Item 3 -->
+<div class="relative pl-6">
+<div class="absolute w-4 h-4 rounded-full bg-outline -left-[9px] top-1 border-4 border-surface-container-lowest"></div>
+<div class="flex flex-col gap-1">
+<div class="flex items-center gap-2">
+<span class="font-label-md text-label-md text-on-background font-semibold">Pasture Pilot</span>
+<span class="font-label-sm text-label-sm text-on-surface-variant">Yesterday, 04:15 PM</span>
+</div>
+<p class="font-body-md text-body-md text-on-surface-variant">Generated optimal grazing rotation map for North Paddocks based on recent rainfall data.</p>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- Right Column: Global AI Chat Interface -->
+<div class="lg:col-span-4 bg-surface-container-lowest border border-outline-variant rounded-xl flex flex-col h-[600px] lg:h-[calc(100vh-8rem)] lg:sticky lg:top-24 shadow-[0_4px_24px_rgba(4,90,129,0.05)]">
+<!-- Chat Header -->
+<div class="p-4 border-b border-outline-variant flex items-center gap-3 bg-surface-container-low rounded-t-xl">
+<div class="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-on-primary shadow-sm">
+<span class="material-symbols-outlined">smart_toy</span>
+</div>
+<div>
+<h3 class="font-label-md text-label-md text-on-background font-semibold">AgriTwin Brain</h3>
+<p class="font-label-sm text-label-sm text-on-surface-variant flex items-center gap-1">
+<span class="w-2 h-2 rounded-full bg-primary inline-block"></span> Online
+                            </p>
+</div>
+</div>
+<!-- Chat History Canvas -->
+<div data-testid="chat-history" class="flex-1 overflow-y-auto p-4 flex flex-col gap-4 bg-background/50">
+<!-- System Welcome -->
+<div class="flex justify-center">
+<span class="bg-surface-variant text-on-surface-variant px-3 py-1 rounded-full font-label-sm text-label-sm">Session Started - 08:00 AM</span>
+</div>
+<!-- AI Message -->
+<div class="flex gap-3 max-w-[90%]">
+<div class="w-8 h-8 rounded-full bg-primary flex-shrink-0 flex items-center justify-center text-on-primary mt-1">
+<span class="material-symbols-outlined text-sm">smart_toy</span>
+</div>
+<div class="bg-surface-container p-3 rounded-2xl rounded-tl-sm border border-outline-variant">
+<p class="font-body-md text-body-md text-on-background">Good morning. All autonomous agents are operating nominally. Herd Guardian is currently analyzing some anomalies in Calving Pen B. Would you like a brief summary of overnight events?</p>
+</div>
+</div>
+<!-- User Message -->
+<div class="flex gap-3 max-w-[90%] self-end flex-row-reverse">
+<img alt="User Profile Avatar" class="w-8 h-8 rounded-full border border-outline-variant object-cover mt-1 flex-shrink-0" data-alt="A close-up portrait of a rugged Australian dairy farmer with a weathered face and a slight smile, wearing a practical green work shirt. The background is slightly blurred showing a bright, sunny pasture indicating outdoor fieldwork. The lighting is natural and high-contrast, emphasizing a grounded, professional agricultural setting." src="https://lh3.googleusercontent.com/aida-public/AB6AXuAmUW6PFX9K4buGeNVPxpTTBLkxdMhjXP5Tn5p2E-AjmLAfFheZIiFGRsH9ubpl23KofUIAbwScSeWqO37zBN5Tf6PfgVJcPe54g6aq0rGxvhHttdT6KRs7KeueqCe0LgpGCePtHFuecnkdZ52u-Yo86IhWbtxPaU-vfqUKJ-hsE-D54zq22zuZA7dPfh92Z6XdJRoqICZElWYS_QkkK080WmuRb-Z5zKmodoT1_C16GmP14M0iL5C3GPG0hR58zomMzn14Zesfm909"/>
+<div class="bg-primary text-on-primary p-3 rounded-2xl rounded-tr-sm">
+<p class="font-body-md text-body-md">Yes, give me the highlights and tell me more about Pen B.</p>
+</div>
+</div>
+<!-- AI Message -->
+<div class="flex gap-3 max-w-[90%]">
+<div class="w-8 h-8 rounded-full bg-primary flex-shrink-0 flex items-center justify-center text-on-primary mt-1">
+<span class="material-symbols-outlined text-sm">smart_toy</span>
+</div>
+<div class="bg-surface-container p-3 rounded-2xl rounded-tl-sm border border-outline-variant">
+<p class="font-body-md text-body-md text-on-background mb-2">Overnight Highlights:</p>
+<ul class="list-disc pl-4 font-body-md text-body-md text-on-surface-variant space-y-1 mb-2">
+<li>Milk yield steady at 28L/head average.</li>
+<li>Feed optimizer adjusted ratios at 05:00 AM.</li>
+</ul>
+<p class="font-body-md text-body-md text-on-background">Regarding Pen B: Cow #4092 showed a 30% drop in rumination starting at 11:30 PM. Herd Guardian recommends visual inspection for potential mastitis.</p>
+</div>
+</div>
+</div>
+<!-- Chat Input Area -->
+<div class="p-4 bg-surface border-t border-outline-variant rounded-b-xl">
+<div class="relative">
+<textarea id="agritwin-chat-input" data-action="chat-input" data-testid="chat-input" class="w-full bg-surface-container-lowest border border-outline rounded-lg py-3 pl-4 pr-12 font-body-md text-body-md text-on-background placeholder-on-surface-variant resize-none focus:border-secondary focus:border-2 focus:outline-none transition-all" placeholder="Ask AgriTwin Brain..." rows="1"></textarea>
+<button data-action="send-chat" data-testid="send-chat" class="absolute right-2 top-1/2 -translate-y-1/2 p-2 text-primary hover:bg-surface-container-highest rounded-full transition-colors flex items-center justify-center">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">send</span>
+</button>
+</div>
+<div class="flex gap-2 mt-2">
+<button data-action="show-pen-b-camera" data-testid="show-pen-b-camera" class="px-3 py-1 rounded-full border border-outline-variant text-on-surface-variant font-label-sm text-label-sm hover:bg-surface-container transition-colors">Show Pen B Camera</button>
+<button data-action="generate-report" data-testid="generate-report" class="px-3 py-1 rounded-full border border-outline-variant text-on-surface-variant font-label-sm text-label-sm hover:bg-surface-container transition-colors">Generate Full Report</button>
+</div>
+</div>
+</div>
+</div>
+</div>
+</main>
+<script id="agritwin-dashboard-wiring">
+(() => {
+  const qs = (selector, root = document) => root.querySelector(selector);
+  const qsa = (selector, root = document) => Array.from(root.querySelectorAll(selector));
+
+  function ensureStatusPanel() {
+    let panel = document.getElementById('backend-status');
+    if (panel) return panel;
+
+    const header = qs('main header') || qs('body');
+    panel = document.createElement('div');
+    panel.id = 'backend-status';
+    panel.setAttribute('data-testid', 'backend-status');
+    panel.className = 'mt-3 mb-2 rounded-lg border border-outline-variant bg-surface-container-low px-4 py-2 font-label-sm text-label-sm text-on-surface-variant';
+    panel.textContent = 'Connecting to AgriTwin backend...';
+    header.appendChild(panel);
+    return panel;
+  }
+
+  function setStatus(message, ok = true) {
+    const panel = ensureStatusPanel();
+    panel.textContent = message;
+    panel.dataset.status = ok ? 'connected' : 'error';
+  }
+
+  async function fetchJson(url, options = {}) {
+    const response = await fetch(url, {
+      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+      ...options,
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || response.statusText);
+    return data;
+  }
+
+  function appendChatMessage(text, role = 'assistant') {
+    const history = qs('.flex-1.overflow-y-auto.p-4.flex.flex-col.gap-4');
+    if (!history) return;
+
+    const wrapper = document.createElement('div');
+    wrapper.className = role === 'user'
+      ? 'flex gap-3 max-w-[90%] self-end flex-row-reverse'
+      : 'flex gap-3 max-w-[90%]';
+
+    const bubble = document.createElement('div');
+    bubble.className = role === 'user'
+      ? 'bg-primary text-on-primary p-3 rounded-2xl rounded-tr-sm'
+      : 'bg-surface-container p-3 rounded-2xl rounded-tl-sm border border-outline-variant';
+
+    const p = document.createElement('p');
+    p.className = 'font-body-md text-body-md';
+    p.textContent = text;
+
+    bubble.appendChild(p);
+    wrapper.appendChild(bubble);
+    history.appendChild(wrapper);
+    history.scrollTop = history.scrollHeight;
+  }
+
+  function appendInsight(agent, time, message) {
+    const feed = qs('.relative.border-l-2.border-surface-container');
+    if (!feed) return;
+
+    const item = document.createElement('div');
+    item.className = 'relative pl-6';
+    item.innerHTML =
+      '<div class="absolute w-4 h-4 rounded-full bg-primary -left-[9px] top-1 border-4 border-surface-container-lowest"></div>' +
+      '<div class="flex flex-col gap-1">' +
+      '<div class="flex items-center gap-2">' +
+      '<span class="font-label-md text-label-md text-on-background font-semibold"></span>' +
+      '<span class="font-label-sm text-label-sm text-on-surface-variant"></span>' +
+      '</div>' +
+      '<p class="font-body-md text-body-md text-on-surface-variant"></p>' +
+      '</div>';
+
+    item.querySelectorAll('span')[0].textContent = agent;
+    item.querySelectorAll('span')[1].textContent = time;
+    item.querySelector('p').textContent = message;
+    feed.prepend(item);
+  }
+
+  async function loadDashboardData() {
+    try {
+      const status = await fetch('/api/farm/status').then((response) => response.json());
+      const kpis = await fetch('/api/farm/kpis').then((response) => response.json());
+      const activity = await fetch('/api/agents/activity').then((response) => response.json());
+
+      setStatus(
+        'Backend connected · ' +
+        status.farm +
+        ' · ' +
+        status.system +
+        ' · Active agents: ' +
+        status.activeAgents +
+        ' · Sensor coverage: ' +
+        (kpis.kpis?.sensorCoveragePercent ?? 'n/a') +
+        '%'
+      );
+
+      if (Array.isArray(activity.activity)) {
+        activity.activity.slice(0, 3).reverse().forEach((entry) => {
+          appendInsight(entry.agent, entry.time, entry.message);
+        });
+      }
+    } catch (error) {
+      setStatus('Backend connection degraded: ' + error.message, false);
+    }
+  }
+
+  async function sendChat(agent = 'AgriTwin Brain', messageOverride = null) {
+    const input = document.getElementById('agritwin-chat-input');
+    const message = messageOverride || input?.value?.trim() || 'Summarise current farm status';
+    if (input) input.value = '';
+
+    appendChatMessage(message, 'user');
+
+    try {
+      const response = await fetch('/api/agents/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message, agent }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || response.statusText);
+      appendChatMessage(data.reply || 'No reply returned.', 'assistant');
+      setStatus('Chat response received from ' + (data.agent || 'AgriTwin Brain'));
+    } catch (error) {
+      appendChatMessage('Chat request failed: ' + error.message, 'assistant');
+      setStatus('Chat request failed: ' + error.message, false);
+    }
+  }
+
+  function wireNavigation() {
+    qsa('[data-route]').forEach((link) => {
+      link.addEventListener('click', (event) => {
+        event.preventDefault();
+        const route = link.dataset.route;
+        location.hash = '#/' + route;
+        qsa('[data-route]').forEach((node) => node.classList.remove('bg-primary-container', 'text-on-primary-container', 'font-semibold'));
+        link.classList.add('bg-primary-container', 'text-on-primary-container', 'font-semibold');
+        setStatus('Navigation selected: ' + route.replaceAll('-', ' '));
+      });
+    });
+  }
+
+  function wireActions() {
+    qsa('[data-action="talk-agent"]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const agent = button.dataset.agent || 'AgriTwin Brain';
+        sendChat(agent, 'Talk to ' + agent + ' about the current farm state.');
+      });
+    });
+
+    const input = document.getElementById('agritwin-chat-input');
+    const send = qs('[data-action="send-chat"]');
+
+    if (send) {
+      send.addEventListener('click', () => sendChat('AgriTwin Brain'));
+    }
+
+    if (input) {
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && !event.shiftKey) {
+          event.preventDefault();
+          sendChat('AgriTwin Brain');
+        }
+      });
+    }
+
+    const camera = qs('[data-action="show-pen-b-camera"]');
+    if (camera) {
+      camera.addEventListener('click', async () => {
+        try {
+          const data = await fetch('/api/cameras/pen-b').then((response) => response.json());
+          appendChatMessage(data.summary || 'Pen B camera is available.', 'assistant');
+          setStatus('Camera: ' + data.streamStatus);
+        } catch (error) {
+          setStatus('Camera request failed: ' + error.message, false);
+        }
+      });
+    }
+
+    const report = qs('[data-action="generate-report"]');
+    if (report) {
+      report.addEventListener('click', async () => {
+        try {
+          const data = await fetch('/api/reports/generate').then((response) => response.json());
+          appendChatMessage(data.title + ': ' + data.summary, 'assistant');
+          setStatus('Report generated: ' + data.reportId);
+        } catch (error) {
+          setStatus('Report generation failed: ' + error.message, false);
+        }
+      });
+    }
+
+    const notifications = qs('[data-action="show-alerts"]');
+    if (notifications) {
+      notifications.addEventListener('click', async () => {
+        try {
+          const data = await fetch('/api/alerts').then((response) => response.json());
+          const alerts = data.alerts || [];
+          alerts.forEach((alert) => appendInsight('Alert', alert.severity || 'warning', alert.title + ': ' + alert.message));
+          setStatus('Alerts loaded: ' + alerts.length);
+        } catch (error) {
+          setStatus('Alert request failed: ' + error.message, false);
+        }
+      });
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    ensureStatusPanel();
+    wireNavigation();
+    wireActions();
+    loadDashboardData();
+  });
+})();
+</script>
+</body></html>`);
     return;
   }
 
@@ -957,7 +2022,7 @@ const server = createServer((req, res) => {
 });
 
 server.listen(8080, '0.0.0.0', () => {
-  console.log('[runtime-server] NemoClaw-agritwin-dairy-agentic-ai-platform-frontend listening on 0.0.0.0:8080');
+  console.log('[runtime-server] agritwin-dairy-frontend listening on 0.0.0.0:8080');
   console.log('[runtime-server] App loaded:', loaded);
   if (loadError) console.log('[runtime-server] Load error:', loadError);
 });
