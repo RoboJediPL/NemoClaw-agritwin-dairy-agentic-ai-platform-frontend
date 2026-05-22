@@ -317,6 +317,7 @@ body {
 .border-primary { border-color: var(--color-primary); }
 .border-secondary { border-color: var(--color-secondary); }
 .border-surface-container { border-color: var(--color-surface-container); }
+.border-surface-container-lowest { border-color: var(--color-surface-container-lowest); }
 .border-primary-container { border-color: var(--color-primary-container); }
 .border-tertiary-container { border-color: var(--color-tertiary-container); }
 
@@ -324,9 +325,9 @@ body {
 .rounded-none { border-radius: 0; }
 .rounded { border-radius: 0.125rem; }
 .rounded-md { border-radius: 0.125rem; }
-.rounded-lg { border-radius: 0.25rem; }
-.rounded-xl { border-radius: 0.5rem; }
-.rounded-2xl { border-radius: 1rem; }
+.rounded-lg { border-radius: 2px; }
+.rounded-xl { border-radius: 4px; }
+.rounded-2xl { border-radius: 8px; }
 .rounded-full { border-radius: 0.75rem; }
 .rounded-t-xl { border-top-left-radius: 4px; border-top-right-radius: 4px; }
 .rounded-b-xl { border-bottom-left-radius: 4px; border-bottom-right-radius: 4px; }
@@ -493,6 +494,9 @@ body {
 .focus\:border-secondary:focus { border-color: var(--color-secondary); }
 .focus\:border-2:focus { border-width: 2px; }
 .focus\:outline-none:focus { outline: none; }
+
+/* Placeholder */
+.placeholder-on-surface-variant::placeholder { color: var(--color-on-surface-variant); }
 
 /* Hover */
 .hover\:bg-surface-container:hover { background-color: var(--color-surface-container); }
@@ -1239,6 +1243,7 @@ body {
 .border-primary { border-color: var(--color-primary); }
 .border-secondary { border-color: var(--color-secondary); }
 .border-surface-container { border-color: var(--color-surface-container); }
+.border-surface-container-lowest { border-color: var(--color-surface-container-lowest); }
 .border-primary-container { border-color: var(--color-primary-container); }
 .border-tertiary-container { border-color: var(--color-tertiary-container); }
 
@@ -1246,9 +1251,9 @@ body {
 .rounded-none { border-radius: 0; }
 .rounded { border-radius: 0.125rem; }
 .rounded-md { border-radius: 0.125rem; }
-.rounded-lg { border-radius: 0.25rem; }
-.rounded-xl { border-radius: 0.5rem; }
-.rounded-2xl { border-radius: 1rem; }
+.rounded-lg { border-radius: 2px; }
+.rounded-xl { border-radius: 4px; }
+.rounded-2xl { border-radius: 8px; }
 .rounded-full { border-radius: 0.75rem; }
 .rounded-t-xl { border-top-left-radius: 4px; border-top-right-radius: 4px; }
 .rounded-b-xl { border-bottom-left-radius: 4px; border-bottom-right-radius: 4px; }
@@ -1415,6 +1420,9 @@ body {
 .focus\:border-secondary:focus { border-color: var(--color-secondary); }
 .focus\:border-2:focus { border-width: 2px; }
 .focus\:outline-none:focus { outline: none; }
+
+/* Placeholder */
+.placeholder-on-surface-variant::placeholder { color: var(--color-on-surface-variant); }
 
 /* Hover */
 .hover\:bg-surface-container:hover { background-color: var(--color-surface-container); }
